@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 
 # ---------------------------
-# Boundary sampling (square and circles away from)
+# Boundary sampling (square and circles away from origin)
 # ---------------------------
 def square_boundary_points(n, halfwidth=0.5, seed=0):
     rng = np.random.default_rng(seed)
@@ -160,7 +160,10 @@ def train_min_radius_boundary_2d(
     w_center=1e-3, w_reg=5e-7, report_every=25
 ):
     rng = np.random.default_rng(seed)
-    xB, yB = square_boundary_points(n_boundary, halfwidth, seed=seed)
+    xB, yB = two_circles_boundary_points(
+        n_boundary, radius=0.5,
+        centers=((1.0, 0.5), (-1.0, -0.5)), seed=seed
+    )
 
     # equal-area lower bound (for reporting; area preserved in 2D)
     area = (2*halfwidth)**2
@@ -234,3 +237,4 @@ if __name__ == "__main__":
     ax[1].legend()
 
     plt.tight_layout(); plt.show()
+
