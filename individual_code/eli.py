@@ -6,7 +6,49 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.animation as animation
+import ffmpeg
 
+
+
+
+class Shape:
+    def area(self):
+        return 1.0  # default unit area
+
+    def boundary_points(self, k = 1, seed = 0):
+        raise NotImplementedError("boundary_points not implemented for base Shape class.")
+
+class Circle(Shape):
+
+    def __init__(self, position = [0,0], radius = 1):
+        self.position = position
+        self.radius = radius
+
+    def boundary_points(self, k = 1, seed = 0):
+        rng = np.random.default_rng(seed)
+        theta = rng.uniform(0, 2 * np.pi, k)
+        x = self.radius * np.cos(theta) + self.position[0]
+        y = self.radius * np.sin(theta) + self.position[1]
+        return x, y
+    
+    def area(self):
+        return np.pi * self.radius**2
+    
+class Rectangle(Shape):
+
+    def __init__(self, position = [0,0], verthalfwidth = 0.5, horihalfwidth = 0.25):
+        self.position = position
+        self.verthalfwidth = verthalfwidth
+        self.horihalfwidth = horihalfwidth
+
+    def area(self):
+        return 4 * self.verthalfwidth * self.horihalfwidth
+
+    def boundary_points(self, n, seed=0):
+        x, y = square_boundary_points(n, self.verthalfwidth, self.horihalfwidth, seed=seed)
+        x += self.position[0]
+        y += self.position[1]
+        return x, y
 
 # ---------------------------
 # Boundary sampling (square)
@@ -133,20 +175,21 @@ def finite_diff_grad(f, theta, eps=1e-4):
 # ---------------------------
 def train_min_radius_boundary_2d(
     degree=5, k=3,
-    n_boundary=3000, vert=0.5, hori = 0.25,
+    n_boundary=3000, region=Shape(),
     n_iters=300, lr=2e-2, seed=7,
+    polynomial_bound=0.005,
     w_center=1e-3, w_reg=5e-7, report_every=25,
     animate=False
 ):
     rng = np.random.default_rng(seed)
-    xB, yB = square_boundary_points(n_boundary, vert, hori, seed=seed)
+    xB, yB = region.boundary_points(n_boundary, seed=seed)
 
-    area = (2*vert) * (2*hori)
+    area = region.area()
     r_eq = np.sqrt(area / np.pi)
 
     D = degree + 1
     num_params = 2*k*D
-    theta0 = rng.uniform(-0.05, 0.05, num_params)
+    theta0 = rng.uniform(-polynomial_bound, polynomial_bound, num_params)
     Phi = SymplecticComposition(theta0, degree, k)
     opt = Adam(Phi.params(), lr=lr)
 
@@ -157,13 +200,12 @@ def train_min_radius_boundary_2d(
 
     history = []
     best = (np.inf, Phi.params())
-    bestiter = 1
 
     # For animation
     frames = []
 
     for it in range(1, n_iters+1):
-        xB, yB = square_boundary_points(n_boundary, vert, hori, seed= seed + it)
+        xB, yB = region.boundary_points(n_boundary, seed=seed + it)
         grad = finite_diff_grad(fobj, Phi.params(), eps=1e-4)
         new_params = opt.step(Phi.params(), grad)
         Phi.set_params(new_params)
@@ -173,34 +215,30 @@ def train_min_radius_boundary_2d(
                             rvar=aux["rvar"], cx=aux["cx"], cy=aux["cy"]))
         if L < best[0]:
             best = (float(L), Phi.params())
-            bestiter = it
-
-        if animate:
-            frames.append((xb.copy(), yb.copy()))
 
         if it % report_every == 0 or it == 1 or it == n_iters:
             print(f"[{it:4d}] L={L:.6f}  R={aux['R']:.6f}  r_eq={r_eq:.6f}  "
                   f"rmean={aux['rmean']:.6f}  var={aux['rvar']:.3e}  "
                   f"cent=({aux['cx']:.2e},{aux['cy']:.2e})")
+            if animate:
+                frames.append((xb.copy(), yb.copy()))
 
-    xA, yA = square_boundary_points(n_boundary, vert, hori, seed= seed + bestiter)
-    xB, yB = square_boundary_points(3000, vert, hori, seed= 0)
     Phi.set_params(best[1])
     xb, yb = Phi.forward(xB, yB)
-    return Phi, (xB, yB), (xb, yb), (xA, yA), r_eq, history, frames if animate else None
+    return Phi, (xB, yB), (xb, yb), r_eq, history, frames if animate else None
 
 # ---------------------------
 # Demo
 # ---------------------------
 if __name__ == "__main__":
-    Phi, (xB0, yB0), (xB1, yB1), (xA0, yA0), r_eq, hist, frames = train_min_radius_boundary_2d(
-        degree=5, k=5,
-        n_boundary=3000, vert=0.5, hori=0.125,
-        n_iters=300, lr=2e-2, seed=10,
+    Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, frames = train_min_radius_boundary_2d(
+        degree=5, k=7,
+        n_boundary=3000, region=Circle(position=(1, 1), radius=0.5),
+        polynomial_bound=0.005,
+        n_iters=500, lr=2e-3, seed=10,
         w_center=1e-3, w_reg=5e-7, report_every=25,
         animate=True
     )
-    xA1, yA1 = Phi.forward(xA0, yA0)
 
     # final stats
     r = np.hypot(xB1, yB1)
@@ -214,8 +252,8 @@ if __name__ == "__main__":
     if frames is not None:
         fig, ax = plt.subplots()
         scat = ax.scatter([], [], s=2)
-        ax.set_xlim(-1, 1)
-        ax.set_ylim(-1, 1)
+        ax.set_xlim(-2, 2)
+        ax.set_ylim(-2, 2)
         ax.set_aspect("equal")
         ax.set_title("Boundary evolution")
 
@@ -225,17 +263,15 @@ if __name__ == "__main__":
             return scat,
 
         ani = animation.FuncAnimation(fig, update, frames=frames, interval=100, blit=True)
-        ani.save("rect_evolution.gif", writer="pillow")
+        ani.save("animations/circle_evolution.gif", writer="pillow")
         plt.show()
 
     # plot
     fig, ax = plt.subplots(1, 2, figsize=(10, 5))
     ax[0].scatter(xB0, yB0, s=2, label="boundary")
-    #ax[0].scatter(xA0, yA0, c='red', s=10)
     ax[0].set_aspect("equal"); ax[0].set_title("Input boundary"); ax[0].legend()
 
     ax[1].scatter(xB1, yB1, s=2, label="mapped boundary")
-    #ax[1].scatter(xA1, yA1, c='red', s=10)
     circ_eq = patches.Circle((0,0), r_eq, fill=False, linestyle="--", linewidth=2, label="equal-area radius")
     circ_R  = patches.Circle((0,0), R,    fill=False, linewidth=1.5, label="final max radius")
     ax[1].add_patch(circ_eq); ax[1].add_patch(circ_R)
