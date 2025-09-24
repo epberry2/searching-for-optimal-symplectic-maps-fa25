@@ -6,8 +6,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.animation as animation
-import ffmpeg
-
+import os
+import csv
 
 
 
@@ -33,7 +33,29 @@ class Circle(Shape):
     
     def area(self):
         return np.pi * self.radius**2
+
+class MultipleCircles(Shape):
+
+    def __init__(self, positions, radii):
+        self.positions = positions
+        self.radii = radii
+
+    def boundary_points(self, k=1, seed=0):
+        rng = np.random.default_rng(seed)
+  
+        xs = []
+        ys = []
+        for pos, radius in zip(self.positions, self.radii):
+            theta = rng.uniform(0, 2 * np.pi, k // len(self.positions))
+            x = radius * np.cos(theta) + pos[0]
+            y = radius * np.sin(theta) + pos[1]
+            xs = np.concatenate([xs, x])
+            ys = np.concatenate([ys, y])
+        return xs, ys
     
+    def area(self):
+        return np.pi * sum(r**2 for r in self.radii)
+
 class Rectangle(Shape):
 
     def __init__(self, position = [0,0], verthalfwidth = 0.5, horihalfwidth = 0.25):
@@ -49,6 +71,23 @@ class Rectangle(Shape):
         x += self.position[0]
         y += self.position[1]
         return x, y
+    
+class MultipleShapes(Shape):
+
+    def __init__(self, shapes):
+        self.shapes = shapes
+
+    def boundary_points(self, k=1, seed=0):
+        xs = []
+        ys = []
+        for shape in self.shapes:
+            x, y = shape.boundary_points(k // len(self.shapes), seed=seed)
+            xs = np.concatenate([xs, x])
+            ys = np.concatenate([ys, y])
+        return xs, ys
+    
+    def area(self):
+        return sum(shape.area() for shape in self.shapes)
 
 # ---------------------------
 # Boundary sampling (square)
@@ -75,6 +114,7 @@ def square_boundary_points(n, verthalfwidth=0.5, horihalfwidth = 0.25, seed=0):
 
     X = np.concatenate(xs); Y = np.concatenate(ys)
     return X, Y
+
 
 # ---------------------------
 # Exact symplectic shear maps
@@ -200,6 +240,7 @@ def train_min_radius_boundary_2d(
 
     history = []
     best = (np.inf, Phi.params())
+    bestiter = 0
 
     # For animation
     frames = []
@@ -207,14 +248,34 @@ def train_min_radius_boundary_2d(
     for it in range(1, n_iters+1):
         xB, yB = region.boundary_points(n_boundary, seed=seed + it)
         grad = finite_diff_grad(fobj, Phi.params(), eps=1e-4)
+
+        # stop if gradient contains NaN/Inf
+        if not np.all(np.isfinite(grad)):
+            print(f"[{it:4d}] Non-finite gradient encountered; stopping.")
+            break
+
         new_params = opt.step(Phi.params(), grad)
+
+        # stop if optimizer produced NaN/Inf parameters
+        if not np.all(np.isfinite(new_params)):
+            print(f"[{it:4d}] Non-finite parameters produced by optimizer; stopping.")
+            break
+
         Phi.set_params(new_params)
 
         L, aux, (xb, yb) = loss_max_radius_boundary(Phi, xB, yB, w_center=w_center, w_reg=w_reg)
+
+        # check for non-finite loss 
+        if not np.isfinite(L):
+            print(f"[{it:4d}] Non-finite loss encountered (L={L}); stopping.")
+            break
+
         history.append(dict(it=it, loss=float(L), R=aux["R"], rmean=aux["rmean"],
                             rvar=aux["rvar"], cx=aux["cx"], cy=aux["cy"]))
+
         if L < best[0]:
             best = (float(L), Phi.params())
+            bestiter = it
 
         if it % report_every == 0 or it == 1 or it == n_iters:
             print(f"[{it:4d}] L={L:.6f}  R={aux['R']:.6f}  r_eq={r_eq:.6f}  "
@@ -225,18 +286,19 @@ def train_min_radius_boundary_2d(
 
     Phi.set_params(best[1])
     xb, yb = Phi.forward(xB, yB)
-    return Phi, (xB, yB), (xb, yb), r_eq, history, frames if animate else None
+    return Phi, (xB, yB), (xb, yb), r_eq, history, bestiter, frames if animate else None
 
 # ---------------------------
 # Demo
 # ---------------------------
+
 if __name__ == "__main__":
-    Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, frames = train_min_radius_boundary_2d(
+    Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, bestiter, frames = train_min_radius_boundary_2d(
         degree=5, k=7,
-        n_boundary=3000, region=Circle(position=(1, 1), radius=0.5),
-        polynomial_bound=0.005,
-        n_iters=500, lr=2e-3, seed=10,
-        w_center=1e-3, w_reg=5e-7, report_every=25,
+        n_boundary=5000, region=MultipleShapes([Rectangle([0, -0.5], verthalfwidth=0.25, horihalfwidth=0.5), Rectangle([0, 0.5], verthalfwidth=0.25, horihalfwidth=0.5)]),
+        polynomial_bound=0.05,
+        n_iters=500, lr=2e-2, seed=10,
+        w_center=1e-3, w_reg=5e-7, report_every=5,
         animate=True
     )
 
@@ -246,14 +308,36 @@ if __name__ == "__main__":
     print("\nFinal summary:")
     print(f"  Equal-area lower bound r_eq = {r_eq:.6f}")
     print(f"  True max radius (boundary)  = {R:.6f}")
+    print(f"  Best Iteration               = {bestiter}")
     print(f"  Mean boundary radius        = {float(r.mean()):.6f}")
 
-      # Animation
+    # Print polynomials of the best map
+    print("\nBest map polynomials (coefficients for A_i and B_i, lowest->highest degree):")
+    for i in range(Phi.k):
+        a_coeffs = Phi.A[i].coeffs
+        b_coeffs = Phi.B[i].coeffs
+        print(f"  A{i+1}: {a_coeffs.tolist()}")
+        print(f"  B{i+1}: {b_coeffs.tolist()}")
+
+    # write history to CSV
+    out_dir = "output"
+    os.makedirs(out_dir, exist_ok=True)
+    csv_path = os.path.join(out_dir, "history.csv")
+    fieldnames = ["it", "loss", "R", "rmean", "rvar", "cx", "cy"]
+    with open(csv_path, "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        writer.writeheader()
+        for row in hist:
+            # write only the selected fields (safe if keys missing)
+            writer.writerow({k: row.get(k, "") for k in fieldnames})
+    print(f"History written to {csv_path}")
+
+    # Animation
     if frames is not None:
         fig, ax = plt.subplots()
-        scat = ax.scatter([], [], s=2)
-        ax.set_xlim(-2, 2)
-        ax.set_ylim(-2, 2)
+        scat = ax.scatter([], [], s=1)
+        ax.set_xlim(-1, 1)
+        ax.set_ylim(-1, 1)
         ax.set_aspect("equal")
         ax.set_title("Boundary evolution")
 
@@ -262,8 +346,9 @@ if __name__ == "__main__":
             scat.set_offsets(np.column_stack([x, y]))
             return scat,
 
-        ani = animation.FuncAnimation(fig, update, frames=frames, interval=100, blit=True)
-        ani.save("animations/circle_evolution.gif", writer="pillow")
+        ani = animation.FuncAnimation(fig, update, frames=frames, interval=20, blit=True)
+        ani.save("animations/test.mp4", writer="ffmpeg") # save as mp4, use pillow to save as gif
+
         plt.show()
 
     # plot
@@ -279,3 +364,4 @@ if __name__ == "__main__":
     ax[1].legend()
 
     plt.tight_layout(); plt.show()
+
