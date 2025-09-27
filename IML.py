@@ -381,7 +381,7 @@ if __name__ == "__main__":
             return scat,
 
         ani = animation.FuncAnimation(fig, update, frames=frames, interval=20, blit=True)
-        ani.save("animations/test.mp4", writer="pillow") # save as mp4, use pillow to save as gif
+        ani.save("animations/test.gif", writer="pillow") # save as mp4, use pillow to save as gif
 
         plt.show()
 
