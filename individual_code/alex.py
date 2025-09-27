@@ -24,12 +24,15 @@ class Keyhole(Shape):
         self.angle = angle
 
 
-    def boundary_points(self, k1 = 1, k2 = 1, k3 = 1, k4 = 1, seed = 0):
-        rng = np.random.default_rng(seed)
-        theta1 = rng.uniform(self.angle, 2 * np.pi - self.angle, k1)
-        theta2 = rng.uniform(self.angle, 2 * np.pi - self.angle, k2)
-        t1 = rng.uniform(0, 1, k3)
-        t2 = rng.uniform(0, 1, k4)
+    def boundary_points(self, k = 1, seed = 0):
+        rng1 = np.random.default_rng(seed)
+        rng2 = np.random.default_rng(seed + 1)
+        rng3 = np.random.default_rng(seed + 2)
+        rng4 = np.random.default_rng(seed + 3)
+        theta1 = rng1.uniform(self.angle, 2 * np.pi - self.angle, k)
+        theta2 = rng2.uniform(self.angle, 2 * np.pi - self.angle, k)
+        t1 = rng3.uniform(0, 1, k)
+        t2 = rng4.uniform(0, 1, k)
         
         x_in = self.inner_radius * np.cos(theta1) + self.position[0]
         y_in = self.inner_radius * np.sin(theta1) + self.position[1] 
@@ -49,11 +52,8 @@ keyhole = Keyhole(position=[0, 0], inner_radius=1, outer_radius=2, angle=np.pi/8
 
 # Generate boundary points
 # Number of boundary points to sample
-k1 = 200
-k2 = 200
-k3 = 50
-k4 = 50
-x_in, y_in, x_out, y_out, a1, b1, a2, b2 = keyhole.boundary_points(k1 = k1, k2 = k2, k3 = k3, k4 = k4, seed=42)
+k = 500
+x_in, y_in, x_out, y_out, a1, b1, a2, b2 = keyhole.boundary_points(k = k, seed=42)
 
 # Plotting
 plt.figure(figsize=(6, 6))
