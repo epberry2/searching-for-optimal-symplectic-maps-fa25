@@ -328,11 +328,12 @@ def train_min_radius_boundary_2d(
 
 if __name__ == "__main__":
     Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, bestiter, frames = train_min_radius_boundary_2d(
-        degree=7, k=7,
-        n_boundary=5000, region=Keyhole(position=[0, 0], inner_radius=0.25, outer_radius=0.75, angle=np.pi/8),
+        degree=5, k=10,
+        n_boundary=5000, 
+        region=Keyhole(position=[0, 0], inner_radius=0.25, outer_radius=0.75, angle=np.pi/8),
         polynomial_bound=0.005,
         n_iters=500, lr=2e-3, seed=10,
-        w_center=1e-3, w_reg=5e-7, report_every=5,
+        w_center=1e-3, w_reg=5e-7, report_every=25,
         animate=True
     )
 
@@ -381,7 +382,7 @@ if __name__ == "__main__":
             return scat,
 
         ani = animation.FuncAnimation(fig, update, frames=frames, interval=20, blit=True)
-        ani.save("animations/test.gif", writer="pillow") # save as mp4, use pillow to save as gif
+        ani.save("test.gif", writer="pillow") # use ffmpeg to save as mp4, use pillow to save as gif
 
         plt.show()
 
