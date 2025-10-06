@@ -10,7 +10,32 @@ import os
 import csv
 
 
+class Shape4D:
+    def volume(self):
+        return 1.0  # default unit volume
 
+    def boundary_points(self, k = 1, seed = 0):
+        raise NotImplementedError("boundary_points not implemented for base Shape4D class.")
+    
+class Ellipsoid4D(Shape4D):
+
+    def __init__(self, position = [0,0,0,0], radii = [1,1,1,1]):
+        self.position = position
+        self.radii = radii
+
+    def boundary_points(self, k = 1, seed = 0):
+        rng = np.random.default_rng(seed)
+        u = rng.normal(0, 1, (4, k))
+        norm = np.linalg.norm(u, axis=0)
+        x = self.radii[0] * u[0,:] / norm + self.position[0]
+        y = self.radii[1] * u[1,:] / norm + self.position[1]
+        z = self.radii[2] * u[2,:] / norm + self.position[2]
+        w = self.radii[3] * u[3,:] / norm + self.position[3]
+        return x, y, z, w
+    
+    def volume(self):
+        return (4/3)*np.pi**2 * np.prod(self.radii)
+    
 class Shape:
     def area(self):
         return 1.0  # default unit area
@@ -89,6 +114,40 @@ class MultipleShapes(Shape):
     def area(self):
         return sum(shape.area() for shape in self.shapes)
 
+class Keyhole(Shape):
+
+    def __init__(self, position = [0,0], inner_radius = 1, outer_radius = 2, angle = np.pi/8):
+        self.position = position
+        self.inner_radius = inner_radius
+        self.outer_radius = outer_radius
+        self.angle = angle
+
+
+    def boundary_points(self, k = 1, seed = 0):
+        rng1 = np.random.default_rng(seed)
+        rng2 = np.random.default_rng(seed + 1)
+        rng3 = np.random.default_rng(seed + 2)
+        rng4 = np.random.default_rng(seed + 3)
+        theta1 = rng1.uniform(self.angle, 2 * np.pi - self.angle, k // 3)
+        theta2 = rng2.uniform(self.angle, 2 * np.pi - self.angle, k // 3)
+        t1 = rng3.uniform(0, 1, k // 6)
+        t2 = rng4.uniform(0, 1, k // 6)
+        
+        x_in = self.inner_radius * np.cos(theta1) + self.position[0]
+        y_in = self.inner_radius * np.sin(theta1) + self.position[1] 
+        x_out = self.outer_radius * np.cos(theta2) + self.position[0]
+        y_out = self.outer_radius * np.sin(theta2) + self.position[1]
+        a1 = (self.inner_radius - t1 * (self.inner_radius - self.outer_radius)) * np.cos(self.angle) + self.position[0]
+        b1 = (self.inner_radius - t1 * (self.inner_radius - self.outer_radius)) * np.sin(self.angle) + self.position[1]
+        a2 = (self.outer_radius - t2 * (self.outer_radius - self.inner_radius)) * np.cos(2 * np.pi - self.angle) + self.position[0]
+        b2 = (self.outer_radius - t2 * (self.outer_radius - self.inner_radius)) * np.sin(2 * np.pi - self.angle) + self.position[1]
+        xs = np.concatenate([x_in, x_out, a1, a2])
+        ys = np.concatenate([y_in, y_out, b1, b2])
+        return xs, ys
+
+    def area(self):
+        return (self.outer_radius**2 - self.inner_radius**2)*(np.pi - self.angle/2)
+
 # ---------------------------
 # Boundary sampling (square)
 # ---------------------------
@@ -119,6 +178,68 @@ def square_boundary_points(n, verthalfwidth=0.5, horihalfwidth = 0.25, seed=0):
 # ---------------------------
 # Exact symplectic shear maps
 # ---------------------------
+class ASymplecticR4:
+    # A_f: (x1, x2, y1, y2) -> (x1, x2, y1 + df/dx1(x1,x2), y2 + df/dx2(x1,x2))
+    # f(x1, x2) is a bivariate polynomial
+    # coeffs: 2d array of size d+1 by d+1, coeffs[i,j] is coeff of x1^i * x2^j
+    def __init__(self, coeffs): self.set_coeffs(coeffs)
+    def set_coeffs(self, coeffs):
+        self.coeffs = np.asarray(coeffs, dtype=float)
+        d1, d2 = self.coeffs.shape
+        assert d1 == d2, "Coefficient array must be square."
+        da1 = np.array([[i * self.coeffs[i,j] for j in range(d2+1)] for i in range(1, d1+1)], dtype=float) # df/dx1
+        da2 = np.array([[j * self.coeffs[i,j] for j in range(1, d2+1)] for i in range(d1+1)], dtype=float) # df/dx2
+        self.dcoeffs1_desc = da1[::-1, ::-1]  # for np.polyval2d
+        self.dcoeffs2_desc = da2[::-1, ::-1]
+    def __call__(self, x1, x2, y1, y2):
+        return x1, x2, y1 + np.polyval2d(x1, x2, self.dcoeffs1_desc), y2 + np.polyval2d(x1, x2, self.dcoeffs2_desc)
+    
+class BSymplecticR4:
+    # B_g: (x1, x2, y1, y2) -> (x1 + dg/dy1(y1,y2), x2 + dg/dy2(y1,y2), y1, y2)
+    # g(y1, y2) is a bivariate polynomial
+    # coeffs: 2d array of size d+1 by d+1, coeffs[i,j] is coeff of y1^i * y2^j
+    def __init__(self, coeffs): self.set_coeffs(coeffs)
+    def set_coeffs(self, coeffs):
+        self.coeffs = np.asarray(coeffs, dtype=float)
+        d1, d2 = self.coeffs.shape
+        assert d1 == d2, "Coefficient array must be square."
+        db1 = np.array([[i * self.coeffs[i,j] for j in range(d2+1)] for i in range(1, d1+1)], dtype=float) # dg/dy1
+        db2 = np.array([[j * self.coeffs[i,j] for j in range(1, d2+1)] for i in range(d1+1)], dtype=float) # dg/dy2
+        self.dcoeffs1_desc = db1[::-1, ::-1]  # for np.polyval2d
+        self.dcoeffs2_desc = db2[::-1, ::-1]
+    def __call__(self, x1, x2, y1, y2):
+        return x1 + np.polyval2d(y1, y2, self.dcoeffs1_desc), x2 + np.polyval2d(y1, y2, self.dcoeffs2_desc), y1, y2
+    
+class SymplecticCompositionR4:
+    """
+    Phi = A1 ∘ B1 ∘ ... ∘ Ak ∘ Bk.
+    Apply to coords as: (x1,x2,y1,y2) -> Bk -> Ak -> ... -> B1 -> A1
+    params: flat array length 2*k*(degree+1)*(degree+1)
+    """
+    def __init__(self, params, degree, k):
+        self.degree = degree; self.k = k
+        self.set_params(params)
+
+    def set_params(self, params):
+        params = np.asarray(params, dtype=float)
+        D = self.degree + 1
+        assert params.size == 2*self.k*D*D, "Parameter length mismatch."
+        self._params = params.copy()
+        self.A, self.B = [], []
+        for i in range(self.k):
+            a = params[2*i*D*D : 2*i*D*D + D*D].reshape((D,D))
+            b = params[2*i*D*D + D*D : 2*(i+1)*D*D].reshape((D,D))
+            self.A.append(ASymplecticR4(a))
+            self.B.append(BSymplecticR4(b))
+
+    def params(self): return self._params.copy()
+
+    def forward(self, x1, x2, y1, y2):
+        for i in range(self.k-1, -1, -1):
+            x1, x2, y1, y2 = self.B[i](x1, x2, y1, y2)
+            x1, x2, y1, y2 = self.A[i](x1, x2, y1, y2)
+        return x1, x2, y1, y2
+
 class ASymplectic:
     # A_f: (x,y) -> (x, y + f'(x))
     def __init__(self, coeffs): self.set_coeffs(coeffs)
@@ -294,11 +415,12 @@ def train_min_radius_boundary_2d(
 
 if __name__ == "__main__":
     Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, bestiter, frames = train_min_radius_boundary_2d(
-        degree=5, k=7,
-        n_boundary=5000, region=MultipleShapes([Rectangle([0, -0.5], verthalfwidth=0.25, horihalfwidth=0.5), Rectangle([0, 0.5], verthalfwidth=0.25, horihalfwidth=0.5)]),
-        polynomial_bound=0.05,
-        n_iters=500, lr=2e-2, seed=10,
-        w_center=1e-3, w_reg=5e-7, report_every=5,
+        degree=5, k=10,
+        n_boundary=5000, 
+        region=Keyhole(position=[0, 0], inner_radius=0.25, outer_radius=0.75, angle=np.pi/8),
+        polynomial_bound=0.005,
+        n_iters=500, lr=2e-3, seed=10,
+        w_center=1e-3, w_reg=5e-7, report_every=25,
         animate=True
     )
 
@@ -347,7 +469,7 @@ if __name__ == "__main__":
             return scat,
 
         ani = animation.FuncAnimation(fig, update, frames=frames, interval=20, blit=True)
-        ani.save("animations/test.mp4", writer="ffmpeg") # save as mp4, use pillow to save as gif
+        ani.save("test.gif", writer="pillow") # use ffmpeg to save as mp4, use pillow to save as gif
 
         plt.show()
 
@@ -364,4 +486,5 @@ if __name__ == "__main__":
     ax[1].legend()
 
     plt.tight_layout(); plt.show()
+
 
