@@ -140,7 +140,7 @@ class SymplecticCompositionR4:
             x1,x2,y1,y2 = self.B[i](x1,x2,y1,y2)
             x1,x2,y1,y2 = self.A[i](x1,x2,y1,y2)
         return x1,x2,y1,y2
-
+ 
 # Loss and Analytic Gradient
 def loss_max_radius_boundary_R4(Phi, x1B,x2B,y1B,y2B, w_center=1e-3, w_reg=1e-7):
     X1,X2,Y1,Y2 = Phi.forward(x1B,x2B,y1B,y2B)
