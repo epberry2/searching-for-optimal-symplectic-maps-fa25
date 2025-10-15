@@ -8,7 +8,7 @@ import matplotlib.patches as patches
 import matplotlib.animation as animation
 import os
 import csv
-
+import time
 
 class Shape4D:
     def volume(self):
@@ -146,7 +146,7 @@ class Keyhole(Shape):
         return xs, ys
 
     def area(self):
-        return (self.outer_radius**2 - self.inner_radius**2)*(np.pi - self.angle/2)
+        return (self.outer_radius**2 - self.inner_radius**2)*(np.pi - self.angle)
 
 # ---------------------------
 # Boundary sampling (square)
@@ -331,6 +331,66 @@ def finite_diff_grad(f, theta, eps=1e-4):
         g[i] = (f(t) - f0) / eps
     return g
 
+def analytic_grad(Phi, xB, yB, w_center=1e-3, w_reg=5e-7):
+    D = Phi.degree + 1
+    theta = Phi.params()
+    k = Phi.k
+
+    preB_x  = [None]*k 
+    preB_y  = [None]*k
+    postB_x = [None]*k 
+    postB_y = [None]*k
+    postA_x = [None]*k 
+    postA_y = [None]*k
+
+    x, y = xB, yB
+    for i in range(k-1, -1, -1):
+        preB_x[i], preB_y[i] = x, y
+        x, y = Phi.B[i](x, y)
+        postB_x[i], postB_y[i] = x, y
+        x, y = Phi.A[i](x, y)
+        postA_x[i], postA_y[i] = x, y
+
+    x_final, y_final = x, y
+
+    r = np.hypot(x_final, y_final)
+    R = r.max()
+    mask = (r >= R - 0.0)
+
+    gx = np.zeros_like(x_final)
+    gy = np.zeros_like(y_final)
+    gx[mask] = x_final[mask] / (r[mask] + 1e-12)
+    gy[mask] = y_final[mask] / (r[mask] + 1e-12)
+
+    gx += 2.0 * w_center * (x_final.mean()) / x_final.size
+    gy += 2.0 * w_center * (y_final.mean()) / y_final.size
+    grad = np.zeros_like(theta)
+    for i in range(0, k):
+        x_in_A = postB_x[i]
+        a = Phi.A[i].coeffs  
+
+        if D >= 3:
+            d2_a = np.array([m*(m-1)*a[m] for m in range(2, D)], dtype=float)
+            f2 = np.polyval(d2_a[::-1], x_in_A)
+        else:
+            f2 = 0.0
+        base = 2*i*D
+        for m in range(1, D):
+            grad[base + m] += np.sum(gy * (x_in_A**(m-1)) * m)
+        gx = gx + gy * f2
+        y_in_B = preB_y[i]
+        b = Phi.B[i].coeffs
+        if D >= 3:
+            d2_b = np.array([m*(m-1)*b[m] for m in range(2, D)], dtype=float)
+            g2 = np.polyval(d2_b[::-1], y_in_B)
+        else:
+            g2 = 0.0
+        for m in range(1, D):
+            grad[base + D + m] += np.sum(gx * (y_in_B**(m-1)) * m)
+        gy = gy + gx * g2
+    grad += 2.0 * w_reg * theta
+    return grad
+
 # ---------------------------
 # Training (boundary only)
 # ---------------------------
@@ -368,7 +428,7 @@ def train_min_radius_boundary_2d(
 
     for it in range(1, n_iters+1):
         xB, yB = region.boundary_points(n_boundary, seed=seed + it)
-        grad = finite_diff_grad(fobj, Phi.params(), eps=1e-4)
+        grad = analytic_grad(Phi, xB, yB, w_center=w_center, w_reg=w_reg)
 
         # stop if gradient contains NaN/Inf
         if not np.all(np.isfinite(grad)):
@@ -413,6 +473,94 @@ def train_min_radius_boundary_2d(
 # Demo
 # ---------------------------
 
+OUT_DIR = "output_r_vs_d"  # folder already in repo; safe to write here
+os.makedirs(OUT_DIR, exist_ok=True)
+
+def run_vary_degree(
+    degree_values,
+    k=10,
+    n_boundary=3000,
+    n_iters=300,
+    seed=1,
+    polynomial_bound=0.005,
+    lr=2e-3,
+    w_center=1e-3,
+    w_reg=5e-7,
+    report_every=1000,
+    animate=False,
+    region=None,
+):
+    if region is None:
+        region = Keyhole(position=[0,0], inner_radius=0.25, outer_radius=0.75, angle=np.pi/8)
+
+    results = []
+    for d in degree_values:
+        print(f"\n=== Running d={d} ===")
+        t0 = time.time()
+        Phi, (xB0, yB0), (xB1, yB1), r_eq, history, bestiter, frames = train_min_radius_boundary_2d(
+            degree=d,
+            k=k,
+            n_boundary=n_boundary,
+            region=region,
+            n_iters=n_iters,
+            lr=lr,
+            seed=seed,
+            polynomial_bound=polynomial_bound,
+            w_center=w_center,
+            w_reg=w_reg,
+            report_every=report_every,
+            animate=animate,
+        )
+        t1 = time.time()
+        r = np.hypot(xB1, yB1)
+        R = float(r.max())
+        print(f"d={d} finished in {t1-t0:.1f}s  final true max radius R={R:.6f}")
+        results.append(dict(d=int(d), R=float(R), r_eq=float(r_eq), time_s=(t1-t0)))
+
+        # save a small scatter for each d (optional)
+        fig, ax = plt.subplots(figsize=(4,4))
+        ax.scatter(xB1, yB1, s=1)
+        circ = plt.Circle((0,0), R, fill=False, linewidth=1.2, color='r')
+        ax.add_patch(circ)
+        ax.set_aspect('equal')
+        ax.set_title(f'd={d}  R={R:.4f}')
+        fname = os.path.join(OUT_DIR, f'map_d_{d}.png')
+        plt.tight_layout(); plt.savefig(fname); plt.close(fig)
+
+    # write csv
+    csv_path = os.path.join(OUT_DIR, 'vary_d_results.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.DictWriter(f, fieldnames=['d','R','r_eq','time_s'])
+        writer.writeheader()
+        for row in results:
+            writer.writerow(row)
+
+    # plot R vs d
+    ds = [r['d'] for r in results]
+    Rs = [r['R'] for r in results]
+    plt.figure(figsize=(6,4))
+    plt.plot(ds, Rs, marker='o')
+    for i, t in enumerate([r['time_s'] for r in results]):
+        plt.text(ds[i], Rs[i], f"{t:.1f}s", fontsize=8, ha='center', va='bottom')
+    plt.xlabel('d (degree of polynomial)')
+    plt.ylabel('Final true max radius R')
+    plt.title('Final max radius vs d')
+    plt.grid(True)
+    out_png = os.path.join(OUT_DIR, 'vary_d_plot.png')
+    plt.tight_layout(); plt.savefig(out_png); plt.close()
+    print(f"Results written to {csv_path} and {out_png}")
+
+    return results
+
+if __name__ == '__main__':
+    # small default sweep (adjust as you like)
+    d_values = [1, 2, 5, 6, 8, 10, 12]
+    res = run_vary_degree(d_values, k=5, n_boundary=3000, n_iters=30000, lr=2e-3, seed=10)
+    print('\nSummary:')
+    for r in res:
+        print(f"d={r['d']}: R={r['R']:.6f}  r_eq={r['r_eq']:.6f}  time={r['time_s']:.1f}s")
+
+'''
 if __name__ == "__main__":
     Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, bestiter, frames = train_min_radius_boundary_2d(
         degree=5, k=10,
@@ -469,7 +617,7 @@ if __name__ == "__main__":
             return scat,
 
         ani = animation.FuncAnimation(fig, update, frames=frames, interval=20, blit=True)
-        ani.save("test.gif", writer="pillow") # use ffmpeg to save as mp4, use pillow to save as gif
+        ani.save("test1.mp4", writer="ffmpeg") # use ffmpeg to save as mp4, use pillow to save as gif
 
         plt.show()
 
@@ -486,5 +634,4 @@ if __name__ == "__main__":
     ax[1].legend()
 
     plt.tight_layout(); plt.show()
-
-
+'''
