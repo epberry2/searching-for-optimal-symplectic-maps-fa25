@@ -1,447 +1,280 @@
-#!/usr/bin/env python3
-# Boundary-only: learn a 2D symplectic map (composition of shears) that
-# minimizes the maximum radius of the mapped boundary.
-
 import numpy as np
+from numpy.polynomial.polynomial import polyval2d as _np_polyval2d
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 import matplotlib.animation as animation
-import os
-import csv
-import time
+import os, csv, argparse
 
-# Optional PyTorch integration
-try:
-    import torch
-except Exception:
-    torch = None
+def _polyval2d_desc(x, y, c_desc):
+    c_asc = c_desc[::-1, ::-1]
+    return _np_polyval2d(x, y, c_asc)
+
+np.polyval2d = _polyval2d_desc
+
+
 
 class Shape4D:
-    def volume(self):
-        return 1.0  # default unit volume
+    def volume(self): return 1.0
+    def boundary_points(self, k=1, seed=0): raise NotImplementedError
 
-    def boundary_points(self, k = 1, seed = 0):
-        raise NotImplementedError("boundary_points not implemented for base Shape4D class.")
-    
-class Ellipsoid4D(Shape4D):
-
-    def __init__(self, position = [0,0,0,0], radii = [1,1,1,1]):
-        self.position = position
-        self.radii = radii
-
-    def boundary_points(self, k = 1, seed = 0):
-        rng = np.random.default_rng(seed)
-        u = rng.normal(0, 1, (4, k))
-        norm = np.linalg.norm(u, axis=0)
-        x = self.radii[0] * u[0,:] / norm + self.position[0]
-        y = self.radii[1] * u[1,:] / norm + self.position[1]
-        z = self.radii[2] * u[2,:] / norm + self.position[2]
-        w = self.radii[3] * u[3,:] / norm + self.position[3]
-        return x, y, z, w
-    
-    def volume(self):
-        return (4/3)*np.pi**2 * np.prod(self.radii)
-    
-class Shape:
-    def area(self):
-        return 1.0  # default unit area
-
-    def boundary_points(self, k = 1, seed = 0):
-        raise NotImplementedError("boundary_points not implemented for base Shape class.")
-
-class Circle(Shape):
-
-    def __init__(self, position = [0,0], radius = 1):
-        self.position = position
-        self.radius = radius
-
-    def boundary_points(self, k = 1, seed = 0):
-        rng = np.random.default_rng(seed)
-        theta = rng.uniform(0, 2 * np.pi, k)
-        x = self.radius * np.cos(theta) + self.position[0]
-        y = self.radius * np.sin(theta) + self.position[1]
-        return x, y
-    
-    def area(self):
-        return np.pi * self.radius**2
-
-class MultipleCircles(Shape):
-
-    def __init__(self, positions, radii):
-        self.positions = positions
-        self.radii = radii
-
-    def boundary_points(self, k=1, seed=0):
-        rng = np.random.default_rng(seed)
-  
-        xs = []
-        ys = []
-        for pos, radius in zip(self.positions, self.radii):
-            theta = rng.uniform(0, 2 * np.pi, k // len(self.positions))
-            x = radius * np.cos(theta) + pos[0]
-            y = radius * np.sin(theta) + pos[1]
-            xs = np.concatenate([xs, x])
-            ys = np.concatenate([ys, y])
-        return xs, ys
-    
-    def area(self):
-        return np.pi * sum(r**2 for r in self.radii)
-
-class Rectangle(Shape):
-
-    def __init__(self, position = [0,0], verthalfwidth = 0.5, horihalfwidth = 0.25):
-        self.position = position
-        self.verthalfwidth = verthalfwidth
-        self.horihalfwidth = horihalfwidth
-
-    def area(self):
-        return 4 * self.verthalfwidth * self.horihalfwidth
-
-    def boundary_points(self, n, seed=0):
-        x, y = square_boundary_points(n, self.verthalfwidth, self.horihalfwidth, seed=seed)
-        x += self.position[0]
-        y += self.position[1]
-        return x, y
-    
-class MultipleShapes(Shape):
-
-    def __init__(self, shapes):
-        self.shapes = shapes
-
-    def boundary_points(self, k=1, seed=0):
-        xs = []
-        ys = []
-        for shape in self.shapes:
-            x, y = shape.boundary_points(k // len(self.shapes), seed=seed)
-            xs = np.concatenate([xs, x])
-            ys = np.concatenate([ys, y])
-        return xs, ys
-    
-    def area(self):
-        return sum(shape.area() for shape in self.shapes)
-
-class Keyhole(Shape):
-
-    def __init__(self, position = [0,0], inner_radius = 1, outer_radius = 2, angle = np.pi/8):
-        self.position = position
-        self.inner_radius = inner_radius
-        self.outer_radius = outer_radius
-        self.angle = angle
-
-
-    def boundary_points(self, k = 1, seed = 0):
-        rng1 = np.random.default_rng(seed)
-        rng2 = np.random.default_rng(seed + 1)
-        rng3 = np.random.default_rng(seed + 2)
-        rng4 = np.random.default_rng(seed + 3)
-        theta1 = rng1.uniform(self.angle, 2 * np.pi - self.angle, k // 3)
-        theta2 = rng2.uniform(self.angle, 2 * np.pi - self.angle, k // 3)
-        t1 = rng3.uniform(0, 1, k // 6)
-        t2 = rng4.uniform(0, 1, k // 6)
-        
-        x_in = self.inner_radius * np.cos(theta1) + self.position[0]
-        y_in = self.inner_radius * np.sin(theta1) + self.position[1] 
-        x_out = self.outer_radius * np.cos(theta2) + self.position[0]
-        y_out = self.outer_radius * np.sin(theta2) + self.position[1]
-        a1 = (self.inner_radius - t1 * (self.inner_radius - self.outer_radius)) * np.cos(self.angle) + self.position[0]
-        b1 = (self.inner_radius - t1 * (self.inner_radius - self.outer_radius)) * np.sin(self.angle) + self.position[1]
-        a2 = (self.outer_radius - t2 * (self.outer_radius - self.inner_radius)) * np.cos(2 * np.pi - self.angle) + self.position[0]
-        b2 = (self.outer_radius - t2 * (self.outer_radius - self.inner_radius)) * np.sin(2 * np.pi - self.angle) + self.position[1]
-        xs = np.concatenate([x_in, x_out, a1, a2])
-        ys = np.concatenate([y_in, y_out, b1, b2])
-        return xs, ys
-
-    def area(self):
-        return (self.outer_radius**2 - self.inner_radius**2)*(np.pi - self.angle)
-
-# ---------------------------
-# Boundary sampling (square)
-# ---------------------------
-def square_boundary_points(n, verthalfwidth=0.5, horihalfwidth = 0.25, seed=0):
-    rng = np.random.default_rng(seed)
-    n_side = [n // 4] * 4
-    for i in range(n % 4):
-        n_side[i] += 1
-    xs, ys = [], []
-
-    # Bottom: y=-h
-    x = rng.uniform(-horihalfwidth, horihalfwidth, n_side[0])
-    y = np.full_like(x, -verthalfwidth); xs.append(x); ys.append(y)
-    # Right: x=+h
-    y = rng.uniform(-verthalfwidth, verthalfwidth, n_side[1])
-    x = np.full_like(y, +horihalfwidth); xs.append(x); ys.append(y)
-    # Top: y=+h
-    x = rng.uniform(-horihalfwidth, horihalfwidth, n_side[2])
-    y = np.full_like(x, +verthalfwidth); xs.append(x); ys.append(y)
-    # Left: x=-h
-    y = rng.uniform(-verthalfwidth, verthalfwidth, n_side[3])
-    x = np.full_like(y, -horihalfwidth); xs.append(x); ys.append(y)
-
-    X = np.concatenate(xs); Y = np.concatenate(ys)
-    return X, Y
-
-
-# ---------------------------
-# Exact symplectic shear maps
-# ---------------------------
-class ASymplecticR4:
-    # A_f: (x1, x2, y1, y2) -> (x1, x2, y1 + df/dx1(x1,x2), y2 + df/dx2(x1,x2))
-    # f(x1, x2) is a bivariate polynomial
-    # coeffs: 2d array of size d+1 by d+1, coeffs[i,j] is coeff of x1^i * x2^j
-    def __init__(self, coeffs): self.set_coeffs(coeffs)
-    def set_coeffs(self, coeffs):
-        self.coeffs = np.asarray(coeffs, dtype=float)
-        d1, d2 = self.coeffs.shape
-        assert d1 == d2, "Coefficient array must be square."
-        da1 = np.array([[i * self.coeffs[i,j] for j in range(d2+1)] for i in range(1, d1+1)], dtype=float) # df/dx1
-        da2 = np.array([[j * self.coeffs[i,j] for j in range(1, d2+1)] for i in range(d1+1)], dtype=float) # df/dx2
-        self.dcoeffs1_desc = da1[::-1, ::-1]  # for np.polyval2d
-        self.dcoeffs2_desc = da2[::-1, ::-1]
-    def __call__(self, x1, x2, y1, y2):
-        return x1, x2, y1 + np.polyval2d(x1, x2, self.dcoeffs1_desc), y2 + np.polyval2d(x1, x2, self.dcoeffs2_desc)
-    
-class BSymplecticR4:
-    # B_g: (x1, x2, y1, y2) -> (x1 + dg/dy1(y1,y2), x2 + dg/dy2(y1,y2), y1, y2)
-    # g(y1, y2) is a bivariate polynomial
-    # coeffs: 2d array of size d+1 by d+1, coeffs[i,j] is coeff of y1^i * y2^j
-    def __init__(self, coeffs): self.set_coeffs(coeffs)
-    def set_coeffs(self, coeffs):
-        self.coeffs = np.asarray(coeffs, dtype=float)
-        d1, d2 = self.coeffs.shape
-        assert d1 == d2, "Coefficient array must be square."
-        db1 = np.array([[i * self.coeffs[i,j] for j in range(d2+1)] for i in range(1, d1+1)], dtype=float) # dg/dy1
-        db2 = np.array([[j * self.coeffs[i,j] for j in range(1, d2+1)] for i in range(d1+1)], dtype=float) # dg/dy2
-        self.dcoeffs1_desc = db1[::-1, ::-1]  # for np.polyval2d
-        self.dcoeffs2_desc = db2[::-1, ::-1]
-    def __call__(self, x1, x2, y1, y2):
-        return x1 + np.polyval2d(y1, y2, self.dcoeffs1_desc), x2 + np.polyval2d(y1, y2, self.dcoeffs2_desc), y1, y2
-    
-class SymplecticCompositionR4:
+class EllipsoidE1a(Shape4D):
     """
-    Phi = A1 ∘ B1 ∘ ... ∘ Ak ∘ Bk.
-    Apply to coords as: (x1,x2,y1,y2) -> Bk -> Ak -> ... -> B1 -> A1
-    params: flat array length 2*k*(degree+1)*(degree+1)
+    Boundary sampler for the coupled ellipsoid on the blackboard:
+      E(1,a) = { x1^2 + y1^2 + (x2^2 + y2^2)/a <= 1 }.
+    Volume(E(1,a)) = (pi^2/2) * a.
     """
-    def __init__(self, params, degree, k):
-        self.degree = degree; self.k = k
-        self.set_params(params)
+    def __init__(self, a=1.0):
+        assert a > 0, "a must be positive"
+        self.a = float(a)
 
-    def set_params(self, params):
-        params = np.asarray(params, dtype=float)
-        D = self.degree + 1
-        assert params.size == 2*self.k*D*D, "Parameter length mismatch."
-        self._params = params.copy()
-        self.A, self.B = [], []
-        for i in range(self.k):
-            a = params[2*i*D*D : 2*i*D*D + D*D].reshape((D,D))
-            b = params[2*i*D*D + D*D : 2*(i+1)*D*D].reshape((D,D))
-            self.A.append(ASymplecticR4(a))
-            self.B.append(BSymplecticR4(b))
+    def boundary_points(self, k=6000, seed=0):
+        rng = np.random.default_rng(seed)
+        t = rng.uniform(0.0, np.pi/2.0, size=k)
+        alpha = rng.uniform(0.0, 2*np.pi, size=k)
+        beta  = rng.uniform(0.0, 2*np.pi, size=k)
+        r1 = np.cos(t)            
+        r2 = np.sqrt(self.a) * np.sin(t) 
 
-    def params(self): return self._params.copy()
-
-    def forward(self, x1, x2, y1, y2):
-        for i in range(self.k-1, -1, -1):
-            x1, x2, y1, y2 = self.B[i](x1, x2, y1, y2)
-            x1, x2, y1, y2 = self.A[i](x1, x2, y1, y2)
+        x1 = r1 * np.cos(alpha)
+        y1 = r1 * np.sin(alpha)
+        x2 = r2 * np.cos(beta)
+        y2 = r2 * np.sin(beta)
         return x1, x2, y1, y2
 
-class ASymplectic:
-    # A_f: (x,y) -> (x, y + f'(x))
+    def volume(self):
+        return (np.pi**2 / 2.0) * self.a
+
+class Ellipsoid4D(Shape4D):
+    def __init__(self, position=(0,0,0,0), radii=(1,1,1,1)):
+        self.position = np.asarray(position, dtype=float)
+        self.radii = np.asarray(radii, dtype=float)
+    def boundary_points(self, k=1, seed=0):
+        rng = np.random.default_rng(seed)
+        u = rng.normal(0,1,(4,k))
+        u /= np.linalg.norm(u, axis=0, keepdims=True)
+        pts = (self.radii[:,None] * u) + self.position[:,None]
+        return pts[0], pts[1], pts[2], pts[3]
+    def volume(self):
+        return (np.pi**2/2.0) * float(np.prod(self.radii))
+
+class LagrangianTorus4D(Shape4D):
+    def __init__(self, center=(0,0,0,0), radii_xy1=(1,1), radii_xy2=(1,1)):
+        self.center = np.asarray(center, dtype=float)
+        self.rxy1 = np.asarray(radii_xy1, dtype=float)
+        self.rxy2 = np.asarray(radii_xy2, dtype=float)
+    def boundary_points(self, k=2048, seed=0):
+        rng = np.random.default_rng(seed)
+        t1 = rng.uniform(0,2*np.pi,k)
+        t2 = rng.uniform(0,2*np.pi,k)
+        x1 = self.center[0] + self.rxy1[0]*np.cos(t1)
+        y1 = self.center[1] + self.rxy1[1]*np.sin(t1)
+        x2 = self.center[2] + self.rxy2[0]*np.cos(t2)
+        y2 = self.center[3] + self.rxy2[1]*np.sin(t2)
+        return x1, x2, y1, y2
+
+class Union4D(Shape4D):
+    def __init__(self, shapes):
+        self.shapes = list(shapes)
+    def boundary_points(self, k=4000, seed=0):
+        xs1=[]; xs2=[]; ys1=[]; ys2=[]
+        per = max(1, k//len(self.shapes))
+        for i,sh in enumerate(self.shapes):
+            x1,x2,y1,y2 = sh.boundary_points(per, seed=seed+11*i)
+            xs1.append(x1); xs2.append(x2); ys1.append(y1); ys2.append(y2)
+        return np.concatenate(xs1), np.concatenate(xs2), np.concatenate(ys1), np.concatenate(ys2)
+    def volume(self):
+        return sum(getattr(s,'volume',lambda:0.0)() for s in self.shapes)
+
+
+def poly2d_second_derivs(coeffs):
+    c = np.asarray(coeffs, dtype=float)
+    D = c.shape[0]
+    assert c.shape[0]==c.shape[1]
+    p_xx = np.zeros((max(D-2,1), D))
+    for i in range(2, D):
+        p_xx[i-2,:] = i*(i-1)*c[i,:]
+    p_yy = np.zeros((D, max(D-2,1)))
+    for j in range(2, D):
+        p_yy[:,j-2] = j*(j-1)*c[:,j]
+    p_xy = np.zeros((max(D-1,1), max(D-1,1)))
+    if D>=2:
+        for i in range(1,D):
+            for j in range(1,D):
+                p_xy[i-1,j-1] = i*j*c[i,j]
+    def desc(M): return M[::-1, ::-1] if M.size>1 else M
+    return desc(p_xx), desc(p_xy), desc(p_yy)
+
+
+
+class ASymplecticR4:
     def __init__(self, coeffs): self.set_coeffs(coeffs)
     def set_coeffs(self, coeffs):
-        self.coeffs = np.asarray(coeffs, dtype=float)
-        d = len(self.coeffs) - 1
-        dasc = np.array([k * self.coeffs[k] for k in range(1, d + 1)], dtype=float)
-        self.dcoeffs_desc = dasc[::-1]  # for np.polyval
-    def __call__(self, x, y):
-        return x, y + np.polyval(self.dcoeffs_desc, x)
+        c = np.asarray(coeffs, dtype=float)
+        assert c.ndim==2 and c.shape[0]==c.shape[1]
+        self.coeffs = c
+        D = c.shape[0]
+        d1 = np.zeros((D-1, D)) if D>1 else np.zeros((1, D))
+        d2 = np.zeros((D, D-1)) if D>1 else np.zeros((D, 1))
+        for i in range(1,D): d1[i-1,:] = i*c[i,:] 
+        for j in range(1,D): d2[:,j-1] = j*c[:,j]
+        self.d1_desc = d1[::-1, ::-1] if d1.size>1 else d1
+        self.d2_desc = d2[::-1, ::-1] if d2.size>1 else d2
+        p_xx, p_xy, p_yy = poly2d_second_derivs(c)
+        self.f_xx_desc, self.f_xy_desc, self.f_yy_desc = p_xx, p_xy, p_yy
+    def __call__(self, x1,x2,y1,y2):
+        y1 = y1 + np.polyval2d(x1, x2, self.d1_desc)
+        y2 = y2 + np.polyval2d(x1, x2, self.d2_desc)
+        return x1,x2,y1,y2
 
-class BSymplectic:
-    # B_g: (x,y) -> (x + g'(y), y)
+class BSymplecticR4:
     def __init__(self, coeffs): self.set_coeffs(coeffs)
     def set_coeffs(self, coeffs):
-        self.coeffs = np.asarray(coeffs, dtype=float)
-        d = len(self.coeffs) - 1
-        dasc = np.array([k * self.coeffs[k] for k in range(1, d + 1)], dtype=float)
-        self.dcoeffs_desc = dasc[::-1]
-    def __call__(self, x, y):
-        return x + np.polyval(self.dcoeffs_desc, y), y
+        c = np.asarray(coeffs, dtype=float)
+        assert c.ndim==2 and c.shape[0]==c.shape[1]
+        self.coeffs = c
+        D = c.shape[0]
+        d1 = np.zeros((D-1, D)) if D>1 else np.zeros((1, D))
+        d2 = np.zeros((D, D-1)) if D>1 else np.zeros((D, 1))
+        for i in range(1,D): d1[i-1,:] = i*c[i,:] 
+        for j in range(1,D): d2[:,j-1] = j*c[:,j] 
+        self.d1_desc = d1[::-1, ::-1] if d1.size>1 else d1
+        self.d2_desc = d2[::-1, ::-1] if d2.size>1 else d2
+        p_xx, p_xy, p_yy = poly2d_second_derivs(c)   
+        self.g_11_desc, self.g_12_desc, self.g_22_desc = p_xx, p_xy, p_yy
+    def __call__(self, x1,x2,y1,y2):
+        x1 = x1 + np.polyval2d(y1, y2, self.d1_desc)
+        x2 = x2 + np.polyval2d(y1, y2, self.d2_desc)
+        return x1,x2,y1,y2
 
-class SymplecticComposition:
-    """
-    Phi = A1 ∘ B1 ∘ ... ∘ Ak ∘ Bk.
-    Apply to coords as: (x,y) -> Bk -> Ak -> ... -> B1 -> A1
-    params: flat array length 2*k*(degree+1)
-    """
+class SymplecticCompositionR4:
     def __init__(self, params, degree, k):
         self.degree = degree; self.k = k
-        self._torch_phi = None
         self.set_params(params)
-
-    def enable_torch(self, dtype=None, device=None):
-        """Create an internal TorchSymplecticComposition synchronized with this object.
-        After calling this, future set_params calls will also update the torch copy.
-        """
-        if torch is None:
-            raise RuntimeError("PyTorch not available; cannot enable torch copy.")
-        if dtype is None:
-            dtype = torch.get_default_dtype()
-        if device is None:
-            device = torch.device('cpu')
-        # create a torch Parameter that will be the backing storage for the torch phi
-        theta_t = torch.nn.Parameter(torch.tensor(self._params, dtype=dtype, device=device))
-        # build torch phi with param_tensor backing so updates to theta_t are visible
-        self._torch_phi = TorchSymplecticComposition(param_tensor=theta_t, degree=self.degree, k=self.k, dtype=dtype, device=device)
-        # also expose the parameter for external optimizers
-        self._torch_param = theta_t
-
-    def disable_torch(self):
-        """Remove the internal torch copy."""
-        self._torch_phi = None
-
-    def params_tensor(self):
-        """Return a torch tensor of the flat params if torch copy exists, else create one on CPU.
-        This does not modify internal state.
-        """
-        if self._torch_phi is not None:
-            return self._torch_phi.params(as_numpy=False)
-        if torch is None:
-            raise RuntimeError("PyTorch not available to create tensor params")
-        return torch.tensor(self._params, dtype=torch.get_default_dtype())
-
     def set_params(self, params):
         params = np.asarray(params, dtype=float)
         D = self.degree + 1
-        assert params.size == 2*self.k*D, "Parameter length mismatch."
+        need = 2*self.k*D*D
+        assert params.size==need, f"need {need} params, got {params.size}"
         self._params = params.copy()
-        self.A, self.B = [], []
-        for i in range(self.k):
-            a = params[2*i*D : 2*i*D + D]
-            b = params[2*i*D + D : 2*(i+1)*D]
-            self.A.append(ASymplectic(a))
-            self.B.append(BSymplectic(b))
-        # keep torch copy synchronized if present
-        if getattr(self, '_torch_phi', None) is not None:
-            # convert numpy params to torch tensor with same dtype/device as torch_phi
-            t = torch.tensor(self._params, dtype=self._torch_phi._params.dtype, device=self._torch_phi._params.device)
-            self._torch_phi.set_flat_params(t)
-
+        self.A=[]; self.B=[]
+        off=0
+        for _ in range(self.k):
+            a = params[off:off+D*D].reshape(D,D); off += D*D
+            b = params[off:off+D*D].reshape(D,D); off += D*D
+            self.A.append(ASymplecticR4(a))
+            self.B.append(BSymplecticR4(b))
     def params(self): return self._params.copy()
-
-    def forward(self, x, y):
+    def set_params_inplace(self, p): self._params[:] = p; self.set_params(p)  
+    def forward(self, x1,x2,y1,y2):
         for i in range(self.k-1, -1, -1):
-            x, y = self.B[i](x, y)
-            x, y = self.A[i](x, y)
-        return x, y
+            x1,x2,y1,y2 = self.B[i](x1,x2,y1,y2)
+            x1,x2,y1,y2 = self.A[i](x1,x2,y1,y2)
+        return x1,x2,y1,y2
 
 
-class TorchSymplecticComposition:
-    """Torch-native symplectic composition holding derivative coeffs in torch tensors.
-    Params layout: flat 1D tensor length 2*k*D where D = degree+1, same ordering as numpy version.
-    """
-    def __init__(self, params=None, degree=None, k=None, dtype=None, device=None, param_tensor=None):
-        if torch is None:
-            raise RuntimeError("PyTorch is required for TorchSymplecticComposition")
-        if param_tensor is None and (params is None or degree is None or k is None):
-            raise ValueError("Provide either param_tensor or params+degree+k")
-        self.degree = degree if degree is not None else int((param_tensor.numel() // 2)**0.5)
-        self.k = k if k is not None else None
-        if param_tensor is not None:
-            t = param_tensor
-            D = (t.numel() // (2 * (self.k if self.k is not None else 1)))
-            # If degree provided, use that
-            if degree is not None:
-                D = degree + 1
-        else:
-            D = degree + 1
-            if isinstance(params, np.ndarray):
-                t = torch.tensor(params, dtype=dtype if dtype is not None else torch.get_default_dtype(), device=device)
-            else:
-                t = params.to(device=device, dtype=dtype) if isinstance(params, torch.Tensor) else torch.tensor(params, dtype=dtype, device=device)
-        self.D = D
-        # use the provided tensor as backing storage (no clone) so optimizer updates are visible
-        self._params = t
-        self._build_from_flat(self._params)
-
-    def _build_from_flat(self, flat):
-        D = self.D
-        self.A_coeffs = []
-        self.B_coeffs = []
-        self.A_dcoeffs_desc = []
-        self.B_dcoeffs_desc = []
-        for i in range(self.k):
-            start_a = 2*i*D
-            start_b = 2*i*D + D
-            a = flat[start_a : start_a + D]
-            b = flat[start_b : start_b + D]
-            # use views into flat so updates to flat are reflected
-            self.A_coeffs.append(a)
-            self.B_coeffs.append(b)
-            # derivative coeffs (ascending) then reverse to descending for Horner
-            if D > 1:
-                idx = torch.arange(1, D, dtype=flat.dtype, device=flat.device)
-                da = idx * a[1:D]
-                db = idx * b[1:D]
-                self.A_dcoeffs_desc.append(da.flip(0))
-                self.B_dcoeffs_desc.append(db.flip(0))
-            else:
-                self.A_dcoeffs_desc.append(torch.tensor([], dtype=flat.dtype, device=flat.device))
-                self.B_dcoeffs_desc.append(torch.tensor([], dtype=flat.dtype, device=flat.device))
-
-    def set_flat_params(self, flat):
-        # flat: torch tensor
-        self._params = flat.clone().detach()
-        self._build_from_flat(self._params)
-
-    def params(self, as_numpy=False):
-        """Return the flat parameter vector.
-        by default returns a detached torch tensor on the same device/dtype as internal params.
-        If as_numpy=True, returns a CPU numpy copy (matching the numpy `SymplecticComposition.params()` behavior).
-        """
-        t = self._params.clone().detach()
-        if as_numpy:
-            return t.cpu().numpy().copy()
-        return t
-
-    def forward(self, x, y):
-        # x,y are torch tensors
-        def polyval_desc(coeffs_desc, z):
-            # coeffs_desc is descending order
-            if coeffs_desc.numel() == 0:
-                return torch.zeros_like(z)
-            out = torch.zeros_like(z)
-            for c in coeffs_desc:
-                out = out * z + c
-            return out
-
-        for i in range(self.k-1, -1, -1):
-            x = x + polyval_desc(self.B_dcoeffs_desc[i], y)
-            y = y + polyval_desc(self.A_dcoeffs_desc[i], x)
-        return x, y
-
-
-# ---------------------------
-# Loss: true hard max on boundary
-# ---------------------------
-def loss_max_radius_boundary(Phi, xB, yB, w_center=1e-3, w_reg=1e-6):
-    xb, yb = Phi.forward(xB, yB)
-    r = np.hypot(xb, yb)
-    R = float(r.max())  # true discrete max radius on boundary
-
-    # gentle helpers for stability
-    cx = float(xb.mean()); cy = float(yb.mean())
+def loss_max_radius_boundary_R4(Phi, x1B,x2B,y1B,y2B, w_center=1e-3, w_reg=1e-7, tau=None):
+    X1,X2,Y1,Y2 = Phi.forward(x1B,x2B,y1B,y2B)
+    r = np.sqrt(X1*X1 + X2*X2 + Y1*Y1 + Y2*Y2)
+    R = float(r.max())
+    cx = float(X1.mean()); cy = float(X2.mean()); cp = float(Y1.mean()); cq = float(Y2.mean())
     reg = float(np.sum(Phi.params()**2))
+    # smooth max option: use log-sum-exp approximation when tau is provided (>0)
+    if tau is None or tau == 0:
+        Lmax = R
+    else:
+        t = tau * r
+        tmax = float(t.max())
+        s = float(np.exp(t - tmax).sum())
+        Lmax = (tmax + np.log(s)) / float(tau)
+    L = Lmax + w_center*(cx*cx + cy*cy + cp*cp + cq*cq) + w_reg*reg
+    aux = dict(R=R, R_smooth=float(Lmax), rmean=float(r.mean()), rvar=float(r.var()), cx=cx, cy=cy, cp=cp, cq=cq)
+    return L, aux, (X1,X2,Y1,Y2,r)
 
-    L = R + w_center*(cx*cx + cy*cy) + w_reg*reg
-    aux = dict(R=R, cx=cx, cy=cy, rmean=float(r.mean()), rvar=float(r.var()))
-    return L, aux, (xb, yb)
+def analytic_grad_R4(Phi, x1B,x2B,y1B,y2B, w_center=1e-3, w_reg=1e-7, tau=None):
+    k = Phi.k; D = Phi.degree+1
+    preB = [None]*k
+    postB = [None]*k
+    postA = [None]*k
+    x1,x2,y1,y2 = x1B, x2B, y1B, y2B
+    for i in range(k-1, -1, -1):
+        preB[i]  = (x1,x2,y1,y2)
+        x1,x2,y1,y2 = Phi.B[i](x1,x2,y1,y2)
+        postB[i] = (x1,x2,y1,y2)
+        x1,x2,y1,y2 = Phi.A[i](x1,x2,y1,y2)
+        postA[i] = (x1,x2,y1,y2)
+    X1,X2,Y1,Y2 = x1,x2,y1,y2
+    r2 = X1*X1 + X2*X2 + Y1*Y1 + Y2*Y2
+    r = np.sqrt(r2)
+    R = r.max()
+    eps = 1e-12
+    n = X1.size
+    # base derivatives: either hard-max (mask) or softmax weights when tau>0
+    if tau is None or tau == 0:
+        mask = (r >= R - 0.0)
+        dL_dX1 = np.zeros_like(X1); dL_dX2 = np.zeros_like(X2)
+        dL_dY1 = np.zeros_like(Y1); dL_dY2 = np.zeros_like(Y2)
+        dL_dX1[mask] = X1[mask] / (r[mask] + eps)
+        dL_dX2[mask] = X2[mask] / (r[mask] + eps)
+        dL_dY1[mask] = Y1[mask] / (r[mask] + eps)
+        dL_dY2[mask] = Y2[mask] / (r[mask] + eps)
+    else:
+        t = tau * r
+        tmax = float(t.max())
+        e = np.exp(t - tmax)
+        w = e / (e.sum() + 1e-30)
+        dL_dX1 = w * (X1 / (r + eps))
+        dL_dX2 = w * (X2 / (r + eps))
+        dL_dY1 = w * (Y1 / (r + eps))
+        dL_dY2 = w * (Y2 / (r + eps))
 
-# ---------------------------
-# Adam + finite-difference grads
-# ---------------------------
+    # center-term added uniformly across samples
+    dL_dX1 += 2.0*w_center*(X1.mean())/n
+    dL_dX2 += 2.0*w_center*(X2.mean())/n
+    dL_dY1 += 2.0*w_center*(Y1.mean())/n
+    dL_dY2 += 2.0*w_center*(Y2.mean())/n
+    grad = np.zeros_like(Phi.params())
+    D2 = D*D
+    layer_offsets = [(2*i*D2, 2*i*D2 + D2, 2*i*D2 + 2*D2) for i in range(Phi.k)]
+    gx1, gx2, gy1, gy2 = dL_dX1, dL_dX2, dL_dY1, dL_dY2
+    for i in range(k-1, -1, -1):
+        a_start, b_start, _ = layer_offsets[i]
+        x1_in, x2_in, y1_in, y2_in = postB[i]
+        # A-layer coeff grads
+        X1p = np.vstack([x1_in**p for p in range(D)])
+        X2q = np.vstack([x2_in**q for q in range(D)])
+        term1 = np.zeros((D,D)); term2 = np.zeros((D,D))
+        for p in range(1,D):
+            for q in range(D):
+                term1[p,q] = np.sum(gy1 * (p * X1p[p-1] * X2q[q]))
+        for p in range(D):
+            for q in range(1,D):
+                term2[p,q] = np.sum(gy2 * (q * X1p[p] * X2q[q-1]))
+        grad[a_start:a_start+D2] += (term1 + term2).ravel()
+        f_xx = np.polyval2d(x1_in, x2_in, Phi.A[i].f_xx_desc)
+        f_xy = np.polyval2d(x1_in, x2_in, Phi.A[i].f_xy_desc)
+        f_yy = np.polyval2d(x1_in, x2_in, Phi.A[i].f_yy_desc)
+        gx1 = gx1 + gy1 * f_xx + gy2 * f_xy
+        gx2 = gx2 + gy1 * f_xy + gy2 * f_yy
+        x1_pre, x2_pre, y1_pre, y2_pre = preB[i]
+        Y1p = np.vstack([y1_pre**p for p in range(D)])
+        Y2q = np.vstack([y2_pre**q for q in range(D)])
+        term1 = np.zeros((D,D)); term2 = np.zeros((D,D))
+        for p in range(1,D):
+            for q in range(D):
+                term1[p,q] = np.sum(gx1 * (p * Y1p[p-1] * Y2q[q]))
+        for p in range(D):
+            for q in range(1,D):
+                term2[p,q] = np.sum(gx2 * (q * Y1p[p] * Y2q[q-1]))
+        grad[b_start:b_start+D2] += (term1 + term2).ravel()
+        g_11 = np.polyval2d(y1_pre, y2_pre, Phi.B[i].g_11_desc)
+        g_12 = np.polyval2d(y1_pre, y2_pre, Phi.B[i].g_12_desc)
+        g_22 = np.polyval2d(y1_pre, y2_pre, Phi.B[i].g_22_desc)
+        gy1 = gy1 + gx1 * g_11 + gx2 * g_12
+        gy2 = gy2 + gx1 * g_12 + gx2 * g_22
+    grad += 2.0*w_reg * Phi.params()
+    return grad
+
 class Adam:
-    def __init__(self, params, lr=2e-2, b1=0.9, b2=0.999, eps=1e-8):
+    def __init__(self, params, lr=2e-3, b1=0.5, b2=0.999, eps=1e-8):
         self.lr=lr; self.b1=b1; self.b2=b2; self.eps=eps
         self.m=np.zeros_like(params); self.v=np.zeros_like(params); self.t=0
     def step(self, params, grad):
@@ -452,505 +285,276 @@ class Adam:
         vhat = self.v / (1 - self.b2**self.t)
         return params - self.lr * mhat / (np.sqrt(vhat) + self.eps)
 
-def finite_diff_grad(f, theta, eps=1e-4):
-    g = np.zeros_like(theta, dtype=float)
-    f0 = f(theta)
-    for i in range(theta.size):
-        t = theta.copy(); t[i] += eps
-        g[i] = (f(t) - f0) / eps
-    return g
-
-def analytic_grad(Phi, xB, yB, w_center=1e-3, w_reg=5e-7):
-    D = Phi.degree + 1
-    theta = Phi.params()
-    k = Phi.k
-
-    preB_x  = [None]*k 
-    preB_y  = [None]*k
-    postB_x = [None]*k 
-    postB_y = [None]*k
-    postA_x = [None]*k 
-    postA_y = [None]*k
-
-    x, y = xB, yB
-    for i in range(k-1, -1, -1):
-        preB_x[i], preB_y[i] = x, y
-        x, y = Phi.B[i](x, y)
-        postB_x[i], postB_y[i] = x, y
-        x, y = Phi.A[i](x, y)
-        postA_x[i], postA_y[i] = x, y
-
-    x_final, y_final = x, y
-
-    r = np.hypot(x_final, y_final)
-    R = r.max()
-    mask = (r >= R - 0.0)
-
-    gx = np.zeros_like(x_final)
-    gy = np.zeros_like(y_final)
-    gx[mask] = x_final[mask] / (r[mask] + 1e-12)
-    gy[mask] = y_final[mask] / (r[mask] + 1e-12)
-
-    gx += 2.0 * w_center * (x_final.mean()) / x_final.size
-    gy += 2.0 * w_center * (y_final.mean()) / y_final.size
-    grad = np.zeros_like(theta)
-    for i in range(0, k):
-        x_in_A = postB_x[i]
-        a = Phi.A[i].coeffs  
-
-        if D >= 3:
-            d2_a = np.array([m*(m-1)*a[m] for m in range(2, D)], dtype=float)
-            f2 = np.polyval(d2_a[::-1], x_in_A)
-        else:
-            f2 = 0.0
-        base = 2*i*D
-        for m in range(1, D):
-            grad[base + m] += np.sum(gy * (x_in_A**(m-1)) * m)
-        gx = gx + gy * f2
-        y_in_B = preB_y[i]
-        b = Phi.B[i].coeffs
-        if D >= 3:
-            d2_b = np.array([m*(m-1)*b[m] for m in range(2, D)], dtype=float)
-            g2 = np.polyval(d2_b[::-1], y_in_B)
-        else:
-            g2 = 0.0
-        for m in range(1, D):
-            grad[base + D + m] += np.sum(gx * (y_in_B**(m-1)) * m)
-        gy = gy + gx * g2
-    grad += 2.0 * w_reg * theta
-    return grad
 
 
-def analytic_grad_torch(Phi, xB, yB, w_center=1e-3, w_reg=5e-7, eps_mask=0.0, dtype=None, device=None):
-    """
-    Torch implementation of analytic_grad. Returns a torch tensor gradient matching
-    the flattened parameter vector in Phi (shape (num_params,)).
-    Phi remains the numpy-based SymplecticComposition; we read its coeffs and
-    perform the forward/backprop algebra using torch tensors so gradients can be
-    applied with torch.optim.
-    """
-    if torch is None:
-        raise RuntimeError("PyTorch is required for analytic_grad_torch but not available.")
-    # choose dtype/device
-    if dtype is None:
-        dtype = torch.get_default_dtype()
-    if device is None:
-        device = torch.device('cpu')
-
-    # Support two Phi types: numpy-based SymplecticComposition and TorchSymplecticComposition
-    is_torch_phi = hasattr(Phi, 'A_dcoeffs_desc') and hasattr(Phi, 'B_dcoeffs_desc')
-    if is_torch_phi:
-        D = Phi.degree + 1
-        k = Phi.k
-    else:
-        D = Phi.degree + 1
-        theta_np = Phi.params()
-        k = Phi.k
-
-    # Precompute coefficient tensors for the non-torch Phi to avoid repeated conversions
-    if not is_torch_phi:
-        A_desc_list = [None] * k
-        B_desc_list = [None] * k
-        if D >= 3:
-            A_d2_desc_list = [None] * k
-            B_d2_desc_list = [None] * k
-        else:
-            A_d2_desc_list = [torch.tensor([], dtype=dtype, device=device)] * k
-            B_d2_desc_list = [torch.tensor([], dtype=dtype, device=device)] * k
-        for i in range(k):
-            A_desc_list[i] = torch.tensor(np.asarray(Phi.A[i].dcoeffs_desc, dtype=float), dtype=dtype, device=device)
-            B_desc_list[i] = torch.tensor(np.asarray(Phi.B[i].dcoeffs_desc, dtype=float), dtype=dtype, device=device)
-            if D >= 3:
-                a = np.asarray(Phi.A[i].coeffs, dtype=float)
-                d2_a = np.array([m*(m-1)*a[m] for m in range(2, D)], dtype=float)
-                A_d2_desc_list[i] = torch.tensor(d2_a[::-1], dtype=dtype, device=device)
-                b = np.asarray(Phi.B[i].coeffs, dtype=float)
-                d2_b = np.array([m*(m-1)*b[m] for m in range(2, D)], dtype=float)
-                B_d2_desc_list[i] = torch.tensor(d2_b[::-1], dtype=dtype, device=device)
-
-    # helper: evaluate polynomial in descending coeff order via Horner
-    def polyval_desc_torch(coeffs_desc, x):
-        # coeffs_desc: 1D torch tensor [a_n,...,a_0]
-        y = torch.zeros_like(x, dtype=dtype, device=device)
-        for c in coeffs_desc:
-            y = y * x + c
-        return y
-
-    # convert boundary to torch if necessary (avoid copies if already tensors)
-    if isinstance(xB, torch.Tensor):
-        x = xB.to(device=device, dtype=dtype)
-    else:
-        x = torch.tensor(xB, dtype=dtype, device=device)
-    if isinstance(yB, torch.Tensor):
-        y = yB.to(device=device, dtype=dtype)
-    else:
-        y = torch.tensor(yB, dtype=dtype, device=device)
-
-    preB_x = [None] * k
-    preB_y = [None] * k
-    postB_x = [None] * k
-    postB_y = [None] * k
-    postA_x = [None] * k
-    postA_y = [None] * k
-
-    for i in range(k-1, -1, -1):
-        preB_x[i], preB_y[i] = x, y
-        if is_torch_phi:
-            b_desc = Phi.B_dcoeffs_desc[i]
-            x = x + polyval_desc_torch(b_desc, y)
-            postB_x[i], postB_y[i] = x, y
-            a_desc = Phi.A_dcoeffs_desc[i]
-            y = y + polyval_desc_torch(a_desc, x)
-            postA_x[i], postA_y[i] = x, y
-        else:
-            # B: x <- x + g'(y)
-            b_desc = B_desc_list[i]
-            x = x + polyval_desc_torch(b_desc, y)
-            postB_x[i], postB_y[i] = x, y
-            # A: y <- y + f'(x)
-            a_desc = A_desc_list[i]
-            y = y + polyval_desc_torch(a_desc, x)
-            postA_x[i], postA_y[i] = x, y
-
-    x_final, y_final = x, y
-
-    r = torch.sqrt(x_final * x_final + y_final * y_final)
-    R = float(r.max().cpu().detach().numpy())
-    # create mask for near-max points
-    mask = (r >= (R - eps_mask))
-
-    gx = torch.zeros_like(x_final, dtype=dtype, device=device)
-    gy = torch.zeros_like(y_final, dtype=dtype, device=device)
-    # avoid division by zero
-    denom = r[mask] + 1e-12
-    if mask.any():
-        gx[mask] = x_final[mask] / denom
-        gy[mask] = y_final[mask] / denom
-
-    gx = gx + 2.0 * w_center * (x_final.mean()) / x_final.numel()
-    gy = gy + 2.0 * w_center * (y_final.mean()) / y_final.numel()
-
-    # prepare grad tensor
-    num_params = 2 * k * D
-    grad = torch.zeros(num_params, dtype=dtype, device=device)
-    for i in range(0, k):
-        x_in_A = postB_x[i]
-        base = 2*i*D
-        if is_torch_phi:
-            a = Phi.A_coeffs[i]
-            # compute second-derivative descending coefficients: m*(m-1)*a[m]
-            if D >= 3:
-                idx = torch.arange(2, D, dtype=dtype, device=device)
-                d2_a = idx * (idx - 1) * a[2:D]
-                d2_a_desc = d2_a.flip(0)
-                f2 = polyval_desc_torch(d2_a_desc, x_in_A)
-            else:
-                f2 = torch.zeros_like(x_in_A, dtype=dtype, device=device)
-            for m in range(1, D):
-                coeff = float(m)
-                # a is ascending a0..a_{D-1}
-                grad[base + m] = grad[base + m] + torch.sum(gy * (x_in_A ** (m-1)) * coeff)
-            gx = gx + gy * f2
-            y_in_B = preB_y[i]
-            b = Phi.B_coeffs[i]
-            if D >= 3:
-                idx = torch.arange(2, D, dtype=dtype, device=device)
-                d2_b = idx * (idx - 1) * b[2:D]
-                d2_b_desc = d2_b.flip(0)
-                g2 = polyval_desc_torch(d2_b_desc, y_in_B)
-            else:
-                g2 = torch.zeros_like(y_in_B, dtype=dtype, device=device)
-            for m in range(1, D):
-                coeff = float(m)
-                grad[base + D + m] = grad[base + D + m] + torch.sum(gx * (y_in_B ** (m-1)) * coeff)
-            gy = gy + gx * g2
-        else:
-            a = np.asarray(Phi.A[i].coeffs, dtype=float)
-            if D >= 3:
-                d2_a_desc = A_d2_desc_list[i]
-                f2 = polyval_desc_torch(d2_a_desc, x_in_A)
-            else:
-                f2 = torch.zeros_like(x_in_A, dtype=dtype, device=device)
-            for m in range(1, D):
-                coeff = float(m)
-                grad[base + m] = grad[base + m] + torch.sum(gy * (x_in_A ** (m-1)) * coeff)
-            gx = gx + gy * f2
-            y_in_B = preB_y[i]
-            b = np.asarray(Phi.B[i].coeffs, dtype=float)
-            if D >= 3:
-                d2_b_desc = B_d2_desc_list[i]
-                g2 = polyval_desc_torch(d2_b_desc, y_in_B)
-            else:
-                g2 = torch.zeros_like(y_in_B, dtype=dtype, device=device)
-            for m in range(1, D):
-                coeff = float(m)
-                grad[base + D + m] = grad[base + D + m] + torch.sum(gx * (y_in_B ** (m-1)) * coeff)
-            gy = gy + gx * g2
-
-    # regularization term: prefer device-resident params when available
-    if is_torch_phi and hasattr(Phi, 'params'):
-        # Torch-backed phi: get tensor directly
-        try:
-            theta_torch = Phi.params(as_numpy=False)
-        except Exception:
-            theta_torch = Phi._params
-        theta_torch = theta_torch.to(dtype=dtype, device=device)
-    else:
-        theta_torch = torch.tensor(Phi.params(), dtype=dtype, device=device)
-    grad = grad + 2.0 * w_reg * theta_torch
-    return grad
-
-# ---------------------------
-# Training (boundary only)
-# ---------------------------
-def train_min_radius_boundary_2d(
-    degree=5, k=3,
-    n_boundary=3000, region=Shape(),
-    n_iters=300, lr=2e-2, seed=7,
-    polynomial_bound=0.005,
-    w_center=1e-3, w_reg=5e-7, report_every=25,
-    animate=False,
-    use_torch=False,
-    torch_dtype=None,
-    torch_device=None,
-    prealloc_pinned_boundary=False,
-    sync_numpy_every=1,
-    use_autocast=False,
-    autocast_dtype=None,
-    compile_grad=False,
+def train_min_radius_boundary_R4(
+    degree=3, k=6,
+    n_boundary=6000,
+    region=EllipsoidE1a(a=1.44),
+    n_iters=300, lr=1e-3, seed=11,
+    polynomial_bound=5e-3,
+    w_center=1e-3, w_reg=1e-7, report_every=25,
+    tau=None,
+    clip_grad_norm=None,
+    max_step_retries=5,
+    lr_backoff_factor=0.1,
+    min_lr=1e-12,
+    reset_momentum_on_reject=True,
+    revert_to_best_on_failure=True,
+    animate=True, max_frames=60
 ):
     rng = np.random.default_rng(seed)
-    xB, yB = region.boundary_points(n_boundary, seed=seed)
-
-    area = region.area()
-    r_eq = np.sqrt(area / np.pi)
-
     D = degree + 1
-    num_params = 2*k*D
+    num_params = 2*k*D*D
     theta0 = rng.uniform(-polynomial_bound, polynomial_bound, num_params)
-    Phi = SymplecticComposition(theta0, degree, k)
+    Phi = SymplecticCompositionR4(theta0, degree, k)
     opt = Adam(Phi.params(), lr=lr)
-
-    # Setup PyTorch optimizer if requested
-    if use_torch:
-        if torch is None:
-            raise RuntimeError("PyTorch requested but not available. Install torch or set use_torch=False.")
-        if torch_dtype is None:
-            torch_dtype = torch.float32
-        # choose device: prefer provided torch_device, else use CUDA if available
-        if torch_device is None:
-            torch_device = torch.device('cuda') if torch.cuda.is_available() else torch.device('cpu')
-        # If using CUDA (A100), enable some performance flags where available
-        if torch_device.type == 'cuda':
-            try:
-                torch.backends.cudnn.benchmark = True
-            except Exception:
-                pass
-            try:
-                torch.backends.cuda.matmul.allow_tf32 = True
-            except Exception:
-                pass
-            try:
-                torch.set_float32_matmul_precision('high')
-            except Exception:
-                pass
-        # create a SymplecticComposition and enable its internal torch copy on chosen device
-        Phi.enable_torch(dtype=torch_dtype, device=torch_device)
-        # get backing param and optimizer
-        theta_t = Phi._torch_param
-        optim_torch = torch.optim.Adam([theta_t], lr=lr)
-        torch_phi = Phi._torch_phi
-        # set autocast dtype default for CUDA A100
-        if use_autocast and autocast_dtype is None:
-            autocast_dtype = torch.bfloat16 if torch_device.type == 'cuda' else torch.float16
-        # optionally compile the analytic grad function to reduce Python overhead (PyTorch 2.x)
-        if compile_grad and hasattr(torch, 'compile'):
-            try:
-                analytic_grad_torch_compiled = torch.compile(analytic_grad_torch)
-            except Exception:
-                analytic_grad_torch_compiled = analytic_grad_torch
-        else:
-            analytic_grad_torch_compiled = analytic_grad_torch
 
     history = []
     best = (np.inf, Phi.params())
     bestiter = 0
-
-    # For animation
     frames = []
-
-    # Optionally pre-allocate pinned host buffers for faster non-blocking H2D transfers
-    if use_torch and prealloc_pinned_boundary:
-        xB_pin = torch.empty(n_boundary, dtype=torch_dtype, pin_memory=True)
-        yB_pin = torch.empty(n_boundary, dtype=torch_dtype, pin_memory=True)
-
+    x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed)
     for it in range(1, n_iters+1):
-        xB_np, yB_np = region.boundary_points(n_boundary, seed=seed + it)
-        if use_torch:
-            # Transfer boundary samples to device; use pinned-memory non-blocking copy when preallocated
-            if prealloc_pinned_boundary:
-                # handle variable-length boundary samples: resize pinned buffers if necessary
-                Lb = xB_np.shape[0]
-                if xB_pin.numel() < Lb:
-                    xB_pin = torch.empty(Lb, dtype=torch_dtype, pin_memory=True)
-                if yB_pin.numel() < Lb:
-                    yB_pin = torch.empty(Lb, dtype=torch_dtype, pin_memory=True)
-                # copy only the active slice into pinned host memory, then async transfer
-                xB_pin_np = xB_pin.numpy()
-                yB_pin_np = yB_pin.numpy()
-                xB_pin_np[:Lb] = xB_np
-                yB_pin_np[:Lb] = yB_np
-                xB_t = xB_pin[:Lb].to(device=theta_t.device, non_blocking=True)
-                yB_t = yB_pin[:Lb].to(device=theta_t.device, non_blocking=True)
-            else:
-                xB_t = torch.tensor(xB_np, dtype=torch_dtype, device=theta_t.device)
-                yB_t = torch.tensor(yB_np, dtype=torch_dtype, device=theta_t.device)
+        #x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed+it)
 
-            # compute torch-native analytic gradient and step on torch_phi
-            # Optionally run analytic grad under autocast to leverage Tensor Cores
-            if use_autocast and torch_device.type == 'cuda':
-                with torch.autocast(device_type='cuda', dtype=autocast_dtype):
-                    grad_t = analytic_grad_torch_compiled(torch_phi, xB_t, yB_t, w_center=w_center, w_reg=w_reg,
-                                                          eps_mask=0.0, dtype=torch_dtype, device=theta_t.device)
-            else:
-                grad_t = analytic_grad_torch_compiled(torch_phi, xB_t, yB_t, w_center=w_center, w_reg=w_reg,
-                                                      eps_mask=0.0, dtype=torch_dtype, device=theta_t.device)
+        # compute analytic gradient
+        grad = analytic_grad_R4(Phi, x1B,x2B,y1B,y2B, w_center=w_center, w_reg=w_reg, tau=tau)
+        if not np.all(np.isfinite(grad)):
+            print(f"[{it:4d}] Non-finite gradient; stopping."); break
 
-            # optimizer expects float32 grads for stability; cast if necessary
-            with torch.no_grad():
-                optim_torch.zero_grad()
-                if grad_t.dtype != theta_t.dtype:
-                    theta_t.grad = grad_t.to(dtype=theta_t.dtype)
-                else:
-                    theta_t.grad = grad_t
-                optim_torch.step()
+        # record grad norm for diagnostics and optionally clip
+        gnorm = float(np.linalg.norm(grad))
+        if clip_grad_norm is not None and gnorm > 0 and gnorm > clip_grad_norm:
+            grad = grad * (float(clip_grad_norm) / (gnorm + 1e-12))
+            #print(f"[{it:4d}] Clipped grad norm {gnorm:.3e} -> {float(np.linalg.norm(grad)):.3e}")
 
-            # sync numpy params only every sync_numpy_every iterations to reduce overhead
-            if sync_numpy_every is not None and sync_numpy_every > 0 and (it % sync_numpy_every == 0):
-                Phi.set_params(theta_t.detach().cpu().numpy().astype(float))
+        # compute current loss before stepping (used for rollback decisions)
+        L_prev, aux_prev, _ = loss_max_radius_boundary_R4(Phi, x1B,x2B,y1B,y2B, w_center=w_center, w_reg=w_reg, tau=tau)
 
-            # Evaluate mapped boundary for logging without grad tracking
-            with torch.no_grad():
-                xb_t, yb_t = torch_phi.forward(xB_t, yB_t)
-                r_t = torch.sqrt(xb_t * xb_t + yb_t * yb_t)
-                L = float(r_t.max().cpu().detach().numpy()) + w_center * (float(xb_t.mean().cpu().detach().numpy())**2 + float(yb_t.mean().cpu().detach().numpy())**2) + w_reg * float((theta_t.detach()**2).sum().cpu().numpy())
-                aux = dict(R=float(r_t.max().cpu().detach().numpy()), cx=float(xb_t.mean().cpu().detach().numpy()), cy=float(yb_t.mean().cpu().detach().numpy()), rmean=float(r_t.mean().cpu().detach().numpy()), rvar=float(r_t.var().cpu().detach().numpy()))
-                xb = xb_t.detach().cpu().numpy(); yb = yb_t.detach().cpu().numpy()
-        else:
-            grad = analytic_grad(Phi, xB_np, yB_np, w_center=w_center, w_reg=w_reg)
-            new_params = opt.step(Phi.params(), grad)
+        # attempt step(s) with rollback on bad loss and LR reduction
+        attempts = 0
+        accepted = False
+        while attempts <= max_step_retries:
+            old_params = Phi.params().copy()
+            new_params = opt.step(old_params, grad)
+            if not np.all(np.isfinite(new_params)):
+                print(f"[{it:4d}] Non-finite parameters from optimizer; reducing lr and retrying.")
+                opt.lr *= float(lr_backoff_factor)
+                if reset_momentum_on_reject:
+                    opt.m[:] = 0.0; opt.v[:] = 0.0; opt.t = 0
+                    print(f"[{it:4d}] Reset optimizer momentum (m,v,t).")
+                attempts += 1
+                if opt.lr < min_lr:
+                    print(f"[{it:4d}] Learning rate dropped below min_lr={min_lr:.1e}; stopping.")
+                    if revert_to_best_on_failure:
+                        Phi.set_params(best[1])
+                    accepted = False
+                    break
+                continue
             Phi.set_params(new_params)
-            L, aux, (xb, yb) = loss_max_radius_boundary(Phi, xB_np, yB_np, w_center=w_center, w_reg=w_reg)
-
-        # check for non-finite loss 
-        if not np.isfinite(L):
-            print(f"[{it:4d}] Non-finite loss encountered (L={L}); stopping.")
+            L_new, aux_new, (X1,X2,Y1,Y2,r) = loss_max_radius_boundary_R4(Phi, x1B,x2B,y1B,y2B, w_center=w_center, w_reg=w_reg, tau=tau)
+            if not np.isfinite(L_new) or L_new > L_prev * 1.25 + 1e-12:
+                # reject step, back off lr and retry
+                print(f"[{it:4d}] Rejected step: L_prev={L_prev:.6e} L_new={L_new:.6e}; reducing lr and reverting params.")
+                Phi.set_params(old_params)
+                opt.lr *= float(lr_backoff_factor)
+                if reset_momentum_on_reject:
+                    opt.m[:] = 0.0; opt.v[:] = 0.0; opt.t = 0
+                    print(f"[{it:4d}] Reset optimizer momentum (m,v,t) after rejected step.")
+                attempts += 1
+                if opt.lr < min_lr:
+                    print(f"[{it:4d}] Learning rate dropped below min_lr={min_lr:.1e}; reverting to best and stopping.")
+                    if revert_to_best_on_failure:
+                        Phi.set_params(best[1])
+                    accepted = False
+                    break
+                continue
+            # accepted
+            accepted = True
+            L, aux = L_new, aux_new
             break
 
-        history.append(dict(it=it, loss=float(L), R=aux["R"], rmean=aux["rmean"],
-                            rvar=aux["rvar"], cx=aux["cx"], cy=aux["cy"]))
-
+        if not accepted:
+            # if all retries failed, stop training to avoid runaway
+            print(f"[{it:4d}] Failed to find acceptable step after {attempts} attempts; stopping.")
+            break
+        history.append(dict(it=it, loss=float(L), grad_norm=gnorm, **aux))
         if L < best[0]:
-            # If we're using the torch path and not syncing numpy params every iter,
-            # Phi.params() may be stale (still initial). Use the torch backing param
-            # as the authoritative source when available.
-            if use_torch and 'theta_t' in locals():
-                best_params = theta_t.detach().cpu().numpy().astype(float)
-            else:
-                best_params = Phi.params()
-            best = (float(L), best_params)
+            best = (float(L), Phi.params().copy())
             bestiter = it
 
-        if it % report_every == 0 or it == 1 or it == n_iters:
-            print(f"[{it:4d}] L={L:.6f}  R={aux['R']:.6f}  r_eq={r_eq:.6f}  "
-                  f"rmean={aux['rmean']:.6f}  var={aux['rvar']:.3e}  "
-                  f"cent=({aux['cx']:.2e},{aux['cy']:.2e})")
-            if animate:
-                frames.append((xb.copy(), yb.copy()))
+        if animate and (it % report_every == 0 or it==1 or it==n_iters) and len(frames) < max_frames:
+            take = min(4000, X1.size)
+            idx = np.random.default_rng(1234).choice(X1.size, size=take, replace=False)
+            frames.append((X1[idx], Y1[idx], X2[idx], Y2[idx], aux['R']))
+
+        if it % report_every == 0 or it==1 or it==n_iters:
+            print(f"[{it:4d}] L={L:.6f}  R={aux['R']:.6f}  rmean={aux['rmean']:.6f}  var={aux['rvar']:.3e}  "
+                  f"cent=({aux['cx']:.2e},{aux['cy']:.2e},{aux['cp']:.2e},{aux['cq']:.2e})")
 
     Phi.set_params(best[1])
-    xb, yb = Phi.forward(xB, yB)
-    return Phi, (xB, yB), (xb, yb), r_eq, history, bestiter, frames if animate else None
+    x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed+9999)
+    X1,X2,Y1,Y2 = Phi.forward(x1B,x2B,y1B,y2B)
+    return Phi, (x1B,x2B,y1B,y2B), (X1,X2,Y1,Y2), history, bestiter, frames
 
-# ---------------------------
-# Demo
-# ---------------------------
+
+
+def save_projection_animation(frames, outpath="r4_training.gif"):
+    if not frames:
+        print("No frames to animate."); return
+    fig, axes = plt.subplots(1,2, figsize=(9,4.5))
+    scat1 = axes[0].scatter([], [], s=1)
+    scat2 = axes[1].scatter([], [], s=1)
+    for ax,title in zip(axes, ["Projection (x1,y1)", "Projection (x2,y2)"]):
+        ax.set_aspect("equal")
+        ax.set_xlim(-3,3); ax.set_ylim(-3,3)
+        ax.grid(True, alpha=0.3)
+        ax.set_title(title)
+    def update(frame):
+        X1,Y1,X2,Y2,R = frame
+        scat1.set_offsets(np.column_stack([X1, Y1]))
+        scat2.set_offsets(np.column_stack([X2, Y2]))
+        axes[0].set_title(f"(x1,y1)  R≈{R:.3f}")
+        axes[1].set_title(f"(x2,y2)  R≈{R:.3f}")
+        return scat1, scat2
+    ani = animation.FuncAnimation(fig, update, frames=frames, interval=200, blit=True)
+    os.makedirs(os.path.dirname(outpath), exist_ok=True)
+    ani.save(outpath, writer="ffmpeg")
+    plt.close(fig)
+    print(f"Saved animation to {outpath}")
+
+
+def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
+    """Save an animation projecting 4D points to the plane
+    (x1^2 + y1^2, x2^2 + y2^2).
+    Expects frames as a list of tuples: (X1, Y1, X2, Y2, R)
+    where X1 etc are 1D numpy arrays of the same length for that frame.
+    """
+    if not frames:
+        print("No frames to animate."); return
+    # compute reasonable axis limits from pooled data (small number of frames)
+    all_r1_min = np.inf; all_r1_max = -np.inf
+    all_r2_min = np.inf; all_r2_max = -np.inf
+    for X1, Y1, X2, Y2, _ in frames:
+        r1 = 3 * np.pi * (X1**2 + Y1**2)
+        r2 = np.pi * (X2**2 + Y2**2)
+        if r1.size:
+            all_r1_min = min(all_r1_min, float(r1.min())); all_r1_max = max(all_r1_max, float(r1.max()))
+        if r2.size:
+            all_r2_min = min(all_r2_min, float(r2.min())); all_r2_max = max(all_r2_max, float(r2.max()))
+
+    pad1 = 0.05 * (all_r1_max - all_r1_min) if all_r1_max>all_r1_min else 0.1
+    pad2 = 0.05 * (all_r2_max - all_r2_min) if all_r2_max>all_r2_min else 0.1
+
+    fig, ax = plt.subplots(1, 1, figsize=(6,6))
+    scat = ax.scatter([], [], s=1)
+    ax.set_aspect('equal')
+    ax.set_xlim(all_r1_min - pad1, all_r1_max + pad1)
+    ax.set_ylim(all_r2_min - pad2, all_r2_max + pad2)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Radial projection (x1^2+y1^2 vs x2^2+y2^2)")
+
+    def update(frame):
+        X1, Y1, X2, Y2, R = frame
+        r1 = 3 * np.pi * (X1**2 + Y1**2)
+        r2 = np.pi * (X2**2 + Y2**2)
+        coords = np.column_stack([r1, r2])
+        scat.set_offsets(coords)
+        ax.set_title(f"Radial projection  R≈{R:.3f}")
+        return (scat,)
+
+    ani = animation.FuncAnimation(fig, update, frames=frames, interval=200, blit=True)
+    os.makedirs(os.path.dirname(outpath), exist_ok=True)
+    ani.save(outpath, writer="ffmpeg")
+    plt.close(fig)
+    print(f"Saved radial projection animation to {outpath}")
+
+
+
+def build_region(args):
+    if args.region == "E1a":
+        return EllipsoidE1a(a=args.a)
+    elif args.region == "ellipsoid":
+        r = tuple(map(float, args.radii.split(",")))
+        assert len(r)==4, "--radii must have 4 comma-separated floats"
+        return Ellipsoid4D(radii=r)
+    elif args.region == "torus":
+        r1 = tuple(map(float, args.rxy1.split(",")))
+        r2 = tuple(map(float, args.rxy2.split(",")))
+        return LagrangianTorus4D(radii_xy1=r1, radii_xy2=r2)
+    elif args.region == "union_tori":
+        r1 = tuple(map(float, args.rxy1.split(",")))
+        r2 = tuple(map(float, args.rxy2.split(",")))
+        t1 = LagrangianTorus4D(center=(-0.4,0,0,0), radii_xy1=r1, radii_xy2=r2)
+        t2 = LagrangianTorus4D(center=( 0.4,0,0,0), radii_xy1=r1, radii_xy2=r2)
+        return Union4D([t1,t2])
+    else:
+        raise ValueError(f"Unknown region {args.region}")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--degree", type=int, default=3)
+    ap.add_argument("--k", type=int, default=6)
+    ap.add_argument("--n-iters", type=int, default=30000)
+    ap.add_argument("--n-boundary", type=int, default=6000)
+    ap.add_argument("--seed", type=int, default=11)
+    ap.add_argument("--lr", type=float, default=2e-4)
+
+    ap.add_argument("--region", type=str, default="ellipsoid",
+                    choices=["E1a","ellipsoid","torus","union_tori"])
+    ap.add_argument("--a", type=float, default="2.0", help="parameter a in E(1,a)")
+
+    ap.add_argument("--radii", type=str, default="1,3,1,3")
+    ap.add_argument("--rxy1", type=str, default="0.5,0.5")
+    ap.add_argument("--rxy2", type=str, default="0.8,0.6")
+
+    ap.add_argument("--outdir", type=str, default="output_r4")
+    ap.add_argument("--anim", action="store_true", default=True)
+    args = ap.parse_args()
+
+    region = build_region(args)
+    rng = np.random.default_rng(args.seed)
+    D = args.degree + 1
+    num_params = 2*args.k*D*D
+    theta0 = rng.uniform(-5e-3, 5e-3, num_params)
+    Phi = SymplecticCompositionR4(theta0, args.degree, args.k)
+
+    Phi, startB, endB, hist, bestiter, frames = train_min_radius_boundary_R4(
+        degree=args.degree, k=args.k,
+        n_boundary=args.n_boundary,
+        region=region,
+        n_iters=args.n_iters, lr=args.lr, seed=args.seed,
+        polynomial_bound=1e-2,
+        report_every=max(5, args.n_iters//100),
+        animate=args.anim, max_frames=60,
+        clip_grad_norm=5.0,
+        tau=0.0
+    )
+    
+    os.makedirs(args.outdir, exist_ok=True)
+    with open(os.path.join(args.outdir,"history.csv"), "w", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=["it","loss","R", "R_smooth","grad_norm","rmean","rvar","cx","cy","cp","cq"])
+        writer.writeheader()
+        for row in hist: writer.writerow(row)
+    
+    if args.anim:
+        save_projection_animation(frames, outpath=os.path.join(args.outdir,"training.mp4"))
+        save_radial_projection_animation(frames, outpath=os.path.join(args.outdir,"training_radial.mp4"))
+
+    (x1B,x2B,y1B,y2B) = startB
+    (X1,X2,Y1,Y2) = endB
+    fig, axes = plt.subplots(1,2, figsize=(9,4.5))
+    axes[0].scatter(x1B, y1B, s=1, label="input boundary")
+    axes[1].scatter(X1, Y1, s=1, label="mapped boundary")
+    for ax in axes:
+        ax.set_aspect("equal"); ax.grid(True, alpha=0.3); ax.legend()
+    axes[0].set_title("Projection (x1,y1): input")
+    lastR = hist[-1]['R'] if hist else 0.0
+    axes[1].set_title(f"Projection (x1,y1): mapped (R≈{lastR:.3f})")
+    fig.tight_layout()
+    fig.savefig(os.path.join(args.outdir,"snapshot.png"), dpi=150)
+    plt.close(fig)
 
 if __name__ == "__main__":
-    Phi, (xB0, yB0), (xB1, yB1), r_eq, hist, bestiter, frames = train_min_radius_boundary_2d(
-        degree=5, k=10,
-        n_boundary=5000,
-        region=Circle([0.0, 1.0], 1.0),
-        polynomial_bound=0.005,
-        n_iters=500, lr=2e-3, seed=10,
-        w_center=1e-3, w_reg=5e-7, report_every=50,
-        animate=True,
-        use_torch=True,
-        torch_dtype=torch.float32,
-        torch_device=None,
-        prealloc_pinned_boundary=False,
-        sync_numpy_every=100
-    )
-
-    # final stats
-    r = np.hypot(xB1, yB1)
-    R = float(r.max())
-    print("\nFinal summary:")
-    print(f"  Equal-area lower bound r_eq = {r_eq:.6f}")
-    print(f"  True max radius (boundary)  = {R:.6f}")
-    print(f"  Best Iteration               = {bestiter}")
-    print(f"  Mean boundary radius        = {float(r.mean()):.6f}")
-
-    # Print polynomials of the best map
-    print("\nBest map polynomials (coefficients for A_i and B_i, lowest->highest degree):")
-    for i in range(Phi.k):
-        a_coeffs = Phi.A[i].coeffs
-        b_coeffs = Phi.B[i].coeffs
-        print(f"  A{i+1}: {a_coeffs.tolist()}")
-        print(f"  B{i+1}: {b_coeffs.tolist()}")
-
-    # write history to CSV
-    out_dir = "output"
-    os.makedirs(out_dir, exist_ok=True)
-    csv_path = os.path.join(out_dir, "history.csv")
-    fieldnames = ["it", "loss", "R", "rmean", "rvar", "cx", "cy"]
-    with open(csv_path, "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=fieldnames)
-        writer.writeheader()
-        for row in hist:
-            # write only the selected fields (safe if keys missing)
-            writer.writerow({k: row.get(k, "") for k in fieldnames})
-    print(f"History written to {csv_path}")
-
-    # Animation
-    if frames is not None:
-        fig, ax = plt.subplots()
-        scat = ax.scatter([], [], s=1)
-        ax.set_xlim(-2, 2)
-        ax.set_ylim(-2, 2)
-        ax.set_aspect("equal")
-        ax.set_title("Boundary evolution")
-
-        def update(frame):
-            x, y = frame
-            scat.set_offsets(np.column_stack([x, y]))
-            return scat,
-
-        ani = animation.FuncAnimation(fig, update, frames=frames, interval=20, blit=True)
-        ani.save("test1.gif", writer="pillow") # use ffmpeg to save as mp4, use pillow to save as gif
-
-        plt.show()
-
-    # plot
-    fig, ax = plt.subplots(1, 2, figsize=(10, 5))
-    ax[0].scatter(xB0, yB0, s=2, label="boundary")
-    ax[0].set_aspect("equal"); ax[0].set_title("Input boundary"); ax[0].legend()
-
-    ax[1].scatter(xB1, yB1, s=2, label="mapped boundary")
-    circ_eq = patches.Circle((0,0), r_eq, fill=False, linestyle="--", linewidth=2, label="equal-area radius")
-    circ_R  = patches.Circle((0,0), R,    fill=False, linewidth=1.5, label="final max radius")
-    ax[1].add_patch(circ_eq); ax[1].add_patch(circ_R)
-    ax[1].set_aspect("equal"); ax[1].set_title("Mapped boundary")
-    ax[1].legend()
-
-    plt.tight_layout(); plt.show()
+    main()
