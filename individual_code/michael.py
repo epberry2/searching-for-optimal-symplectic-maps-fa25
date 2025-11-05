@@ -402,6 +402,27 @@ def train_min_radius_boundary_R4(
 
         # compute analytic gradient
         grad = analytic_grad_R4(Phi, x1B,x2B,y1B,y2B, w_center=w_center, w_reg=w_reg, tau=tau)
+
+        # ---- compute numerical gradient for Turaev layer ----
+        grad_turaev = None
+        if hasattr(Phi, "turaev") and Phi.turaev is not None:
+            eps = 1e-4
+            c = Phi.turaev.coeffs.copy()
+            dL_dc = np.zeros_like(c)
+            for i in range(c.shape[0]):
+                for j in range(c.shape[1]):
+                    c_perturb = c.copy()
+                    c_perturb[i, j] += eps
+                    Phi.turaev.set_coeffs(c_perturb)
+                    L_plus, _, _ = loss_max_radius_boundary_R4(Phi, x1B, x2B, y1B, y2B, w_center, w_reg, tau)
+                    c_perturb[i, j] -= 2 * eps
+                    Phi.turaev.set_coeffs(c_perturb)
+                    L_minus, _, _ = loss_max_radius_boundary_R4(Phi, x1B, x2B, y1B, y2B, w_center, w_reg, tau)
+                    dL_dc[i, j] = (L_plus - L_minus) / (2 * eps)
+            Phi.turaev.set_coeffs(c)  # restore
+            grad_turaev = dL_dc
+        # -------------------------------------------------------
+
         if not np.all(np.isfinite(grad)):
             print(f"[{it:4d}] Non-finite gradient; stopping."); break
 
