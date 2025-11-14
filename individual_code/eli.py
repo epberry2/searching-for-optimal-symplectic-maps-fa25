@@ -274,7 +274,7 @@ def analytic_grad_R4(Phi, x1B,x2B,y1B,y2B, w_center=1e-3, w_reg=1e-7, tau=None):
     return grad
 
 class Adam:
-    def __init__(self, params, lr=2e-3, b1=0.5, b2=0.999, eps=1e-8):
+    def __init__(self, params, lr=2e-3, b1=0, b2=0.999, eps=1e-8):
         self.lr=lr; self.b1=b1; self.b2=b2; self.eps=eps
         self.m=np.zeros_like(params); self.v=np.zeros_like(params); self.t=0
     def step(self, params, grad):
@@ -292,7 +292,7 @@ def train_min_radius_boundary_R4(
     n_boundary=6000,
     region=EllipsoidE1a(a=1.44),
     n_iters=300, lr=1e-3, seed=11,
-    polynomial_bound=5e-3,
+    polynomial_bound=0,
     w_center=1e-3, w_reg=1e-7, report_every=25,
     tau=None,
     clip_grad_norm=None,
@@ -314,9 +314,9 @@ def train_min_radius_boundary_R4(
     best = (np.inf, Phi.params())
     bestiter = 0
     frames = []
-    x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed)
+    #x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed)
     for it in range(1, n_iters+1):
-        #x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed+it)
+        x1B,x2B,y1B,y2B = region.boundary_points(n_boundary, seed=seed+(it // 5))
 
         # compute analytic gradient
         grad = analytic_grad_R4(Phi, x1B,x2B,y1B,y2B, w_center=w_center, w_reg=w_reg, tau=tau)
@@ -354,7 +354,7 @@ def train_min_radius_boundary_R4(
                 continue
             Phi.set_params(new_params)
             L_new, aux_new, (X1,X2,Y1,Y2,r) = loss_max_radius_boundary_R4(Phi, x1B,x2B,y1B,y2B, w_center=w_center, w_reg=w_reg, tau=tau)
-            if not np.isfinite(L_new) or L_new > L_prev * 1.25 + 1e-12:
+            if not np.isfinite(L_new) or L_new > L_prev * 1.25 + 1e-12 or L_new > 50:
                 # reject step, back off lr and retry
                 print(f"[{it:4d}] Rejected step: L_prev={L_prev:.6e} L_new={L_new:.6e}; reducing lr and reverting params.")
                 Phi.set_params(old_params)
@@ -408,7 +408,7 @@ def save_projection_animation(frames, outpath="r4_training.gif"):
     scat2 = axes[1].scatter([], [], s=1)
     for ax,title in zip(axes, ["Projection (x1,y1)", "Projection (x2,y2)"]):
         ax.set_aspect("equal")
-        ax.set_xlim(-3,3); ax.set_ylim(-3,3)
+        ax.set_xlim(-3,3); ax.set_ylim(-5,5)
         ax.grid(True, alpha=0.3)
         ax.set_title(title)
     def update(frame):
@@ -437,7 +437,7 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
     all_r1_min = np.inf; all_r1_max = -np.inf
     all_r2_min = np.inf; all_r2_max = -np.inf
     for X1, Y1, X2, Y2, _ in frames:
-        r1 = 3 * np.pi * (X1**2 + Y1**2)
+        r1 = 4 * np.pi * (X1**2 + Y1**2)
         r2 = np.pi * (X2**2 + Y2**2)
         if r1.size:
             all_r1_min = min(all_r1_min, float(r1.min())); all_r1_max = max(all_r1_max, float(r1.max()))
@@ -457,7 +457,7 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
 
     def update(frame):
         X1, Y1, X2, Y2, R = frame
-        r1 = 3 * np.pi * (X1**2 + Y1**2)
+        r1 = 5 * np.pi * (X1**2 + Y1**2)
         r2 = np.pi * (X2**2 + Y2**2)
         coords = np.column_stack([r1, r2])
         scat.set_offsets(coords)
@@ -494,18 +494,18 @@ def build_region(args):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--degree", type=int, default=3)
-    ap.add_argument("--k", type=int, default=6)
-    ap.add_argument("--n-iters", type=int, default=30000)
-    ap.add_argument("--n-boundary", type=int, default=6000)
+    ap.add_argument("--degree", type=int, default=5)
+    ap.add_argument("--k", type=int, default=7)
+    ap.add_argument("--n-iters", type=int, default=10000)
+    ap.add_argument("--n-boundary", type=int, default=50)
     ap.add_argument("--seed", type=int, default=11)
-    ap.add_argument("--lr", type=float, default=2e-4)
+    ap.add_argument("--lr", type=float, default=1e-4)
 
     ap.add_argument("--region", type=str, default="ellipsoid",
                     choices=["E1a","ellipsoid","torus","union_tori"])
     ap.add_argument("--a", type=float, default="2.0", help="parameter a in E(1,a)")
 
-    ap.add_argument("--radii", type=str, default="1,3,1,3")
+    ap.add_argument("--radii", type=str, default="1,4,1,4")
     ap.add_argument("--rxy1", type=str, default="0.5,0.5")
     ap.add_argument("--rxy2", type=str, default="0.8,0.6")
 
@@ -525,9 +525,9 @@ def main():
         n_boundary=args.n_boundary,
         region=region,
         n_iters=args.n_iters, lr=args.lr, seed=args.seed,
-        polynomial_bound=1e-2,
+        polynomial_bound=1e-4,
         report_every=max(5, args.n_iters//100),
-        animate=args.anim, max_frames=60,
+        animate=args.anim, max_frames=np.inf,
         clip_grad_norm=5.0,
         tau=0.0
     )
