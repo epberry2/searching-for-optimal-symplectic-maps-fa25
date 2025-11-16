@@ -32,10 +32,26 @@ def polyval2d(y1, y2, coeffs):
     return val
 
 def henon_map_apply_jax(x1, x2, y1, y2, coeffs, const):
+    coeffs = jnp.asarray(coeffs)
     D = coeffs.shape[0]
-    # derivatives of V wrt y1 and y2
-    dV_dy1 = polyval2d(y1, y2, jnp.array([[i * coeffs[i, j] for j in range(D)] for i in range(D)])[:-1, :])
-    dV_dy2 = polyval2d(y1, y2, jnp.array([[j * coeffs[i, j] for j in range(D)] for i in range(D)])[:, :-1])
+    if D <= 1:
+        dV_dy1 = jnp.zeros_like(y1)
+        dV_dy2 = jnp.zeros_like(y2)
+    else:
+        exponents = jnp.arange(D)           # 0..D-1
+        row_mult = (D - 1 - exponents)[:, None]   # shape (D,1)
+        col_mult = (D - 1 - exponents)[None, :]   # shape (1,D)
+
+        dcoeff_dy1 = row_mult * coeffs     # shape (D,D)
+        dcoeff_dy2 = col_mult * coeffs     # shape (D,D)
+
+        # differentiate reduces degree -> drop last row/col
+        dcoeff_dy1 = dcoeff_dy1[:-1, :]    # (D-1, D)
+        dcoeff_dy2 = dcoeff_dy2[:, :-1]    # (D, D-1)
+
+        dV_dy1 = polyval2d(y1, y2, dcoeff_dy1)
+        dV_dy2 = polyval2d(y1, y2, dcoeff_dy2)
+
     return (
         y1 + const[0],
         y2 + const[1],
@@ -138,6 +154,9 @@ def train_min_radius_boundary_R4(
             frames.append((X1B, Y1B, X2B, Y2B, R, it))
         if (it + 1) % report_every == 0 or it == 0:
             print(f"Iter {it+1}, Loss: {loss:.6f}")
+        if not jnp.isfinite(loss) or loss > 1e12:
+            print("Loss diverged, stopping training.")
+            break
     timeend = time.time()
     print(f"Training completed in {timeend - timestart:.2f} seconds.")
     final_params = get_params(opt_state)
@@ -179,8 +198,8 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
     all_r1_min = np.inf; all_r1_max = -np.inf
     all_r2_min = np.inf; all_r2_max = -np.inf
     for X1, Y1, X2, Y2, _, _ in frames:
-        r1 = 3 * np.pi * (X1**2 + Y1**2)
-        r2 = np.pi * (X2**2 + Y2**2)
+        r1 =  (X1**2 + Y1**2)
+        r2 =  (X2**2 + Y2**2) / 4
         if r1.size:
             all_r1_min = min(all_r1_min, float(r1.min())); all_r1_max = max(all_r1_max, float(r1.max()))
         if r2.size:
@@ -203,8 +222,8 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
 
     def update(frame):
         X1, Y1, X2, Y2, R, it = frame
-        r1 = 3 * np.pi * (X1**2 + Y1**2)
-        r2 = np.pi * (X2**2 + Y2**2)
+        r1 =  (X1**2 + Y1**2)
+        r2 =  (X2**2 + Y2**2) / 4
         coords = np.column_stack([r1, r2])
         scat.set_offsets(coords)
         ax.set_title(f"Radial projection  R≈{R:.3f}  iter={it}")
@@ -217,21 +236,22 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
     print(f"Saved radial projection animation to {outpath}")
 
 def main():
-    d = 5
+    
+    d = 6
     k = 10
-    radii = (1,2,1,2)
+    radii = (1,np.sqrt(4),1,np.sqrt(4))
     region = Ellipsoid4D(radii=radii)
     final_params, history, frames = train_min_radius_boundary_R4(
         degree=d, k=k,
-        n_boundary=6000,
+        n_boundary=20000,
         region=region,
-        n_iters=2000, lr=2e-4, seed=11,
-        polynomial_bound=5e-3,
-        w_center=1e-3, w_reg=1e-7, report_every=25,
+        n_iters=1000000, lr=1e-6, seed=1,
+        polynomial_bound=0,
+        w_center=1e-3, w_reg=1e-7, report_every=1000,
         optimizer='adam',
         minibatch_size=None,
         sgd_momentum=0.9,
-        animate=True, max_frames=60
+        animate=True, max_frames=100
     )
 
     with open(os.path.join("output_r4","history.csv"), "w", newline="") as f:
