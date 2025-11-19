@@ -25,33 +25,6 @@ def loss_max_radius_boundary_R4_jax(params, x1B, x2B, y1B, y2B, degree, k, w_cen
     # return (loss, aux) so callers can request auxiliary data via has_aux=True
     return L, R
 
-'''
-def polyval2d(y1, y2, coeffs):
-    """Vectorized, JAX-friendly 2D polynomial evaluator.
-
-    coeffs shape (m,n) corresponds to powers y1^{m-1-i} * y2^{n-1-j}.
-    """
-    # ensure JAX arrays and consistent dtype
-    y1_arr = jnp.asarray(y1)
-    y2_arr = jnp.asarray(y2)
-    coeffs = jnp.asarray(coeffs, dtype=y1_arr.dtype)
-
-    m, n = coeffs.shape
-    # flatten inputs to 1D for Vandermonde construction
-    y1_flat = jnp.ravel(y1_arr)
-    y2_flat = jnp.ravel(y2_arr)
-
-    # Vandermonde matrices: columns are y**(m-1), ..., y**0
-    V1 = jnp.vander(y1_flat, N=m)
-    V2 = jnp.vander(y2_flat, N=n)
-
-    # compute outer-product of Vandermonde columns per-point and contract with coeffs
-    # shape (P, m, n) = V1[:, :, None] * V2[:, None, :]
-    terms = V1[:, :, None] * V2[:, None, :]
-    val_flat = jnp.sum(terms * coeffs[None, :, :], axis=(1, 2))
-    return val_flat.reshape(y1_arr.shape)
-'''
-
 def polyval2d(y1, y2, coeffs):
     # like np.polyval2d but vectorized and JAX-friendly
     m, n = coeffs.shape
@@ -122,7 +95,7 @@ class Ellipsoid4D(Shape4D):
 def train_min_radius_boundary_R4(
     degree=3, k=6,
     n_boundary=6000,
-    region=Ellipsoid4D(radii=(0.25,0.35,0.75,0.55)),
+    region=Ellipsoid4D(radii=(1,2,1,2)),
     n_iters=200, lr=2e-3, seed=11,
     polynomial_bound=5e-3,
     w_center=1e-3, w_reg=1e-7, report_every=25,
@@ -215,7 +188,7 @@ def save_projection_animation(frames, outpath="r4_training.gif"):
         return scat1, scat2
     ani = animation.FuncAnimation(fig, update, frames=frames, interval=200, blit=True)
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
-    ani.save(outpath, writer="ffmpeg")
+    ani.save(outpath, writer="pillow")
     plt.close(fig)
     print(f"Saved animation to {outpath}")
 
@@ -264,7 +237,7 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
 
     ani = animation.FuncAnimation(fig, update, frames=frames, interval=200, blit=True)
     os.makedirs(os.path.dirname(outpath), exist_ok=True)
-    ani.save(outpath, writer="ffmpeg")
+    ani.save(outpath, writer="pillow")
     plt.close(fig)
     print(f"Saved radial projection animation to {outpath}")
 
@@ -272,7 +245,8 @@ def main():
     
     d = 5
     k = 12
-    radii = (1,np.sqrt(4),1,np.sqrt(4))
+    a = 4
+    radii = (1,np.sqrt(a),1,np.sqrt(a))
     region = Ellipsoid4D(radii=radii)
     final_params, history, frames = train_min_radius_boundary_R4(
         degree=d, k=k,
@@ -284,7 +258,7 @@ def main():
         optimizer='adam',
         minibatch_size=None,
         sgd_momentum=0.5,
-        animate=False, max_frames=100
+        animate=True, max_frames=20
     )
 
     with open(os.path.join("output_r4","history.csv"), "w", newline="") as f:
@@ -293,9 +267,21 @@ def main():
         for row in history:
             writer.writerow(row)
 
+    with open(os.path.join("output_r4","params.txt"), "w", newline="") as f:
+        off = 0
+        for i in range(k - 1, -1, -1):
+            coeffs = final_params[off : off + (d+1)*(d+1)].reshape(d+1, d+1)
+            f.write(f"# Henon map {k - i} coefficients:\n")
+            for row in coeffs:
+                f.write("# " + ", ".join(f"{c:.6e}" for c in row) + "\n")
+            off += (d+1)*(d+1)
+            const = final_params[off : off + 2]
+            f.write(f"# Henon map {k - i} constants:\n{const[0]:.6e}, {const[1]:.6e}\n")
+            off += 2
+
     if frames:
-        save_projection_animation(frames, outpath=os.path.join("output_r4","training_animation.mp4"))
-        save_radial_projection_animation(frames, outpath=os.path.join("output_r4","training_radial_animation.mp4"))
+        save_projection_animation(frames, outpath=os.path.join("output_r4","training_animation.gif"))
+        save_radial_projection_animation(frames, outpath=os.path.join("output_r4","training_radial_animation.gif"))
 
     x1B, x2B, y1B, y2B = region.boundary_points(k=6000, seed=12)
     X1B, X2B, Y1B, Y2B = henon_comp_forward_jax(final_params, d, k, x1B, x2B, y1B, y2B)
@@ -309,10 +295,6 @@ def main():
         ax.set_title(title)
     fig.savefig(os.path.join("output_r4","snapshot.png"), dpi=150)
 
-    
-
-
-    
 
 if __name__ == '__main__':
     main()
