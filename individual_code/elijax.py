@@ -1,8 +1,10 @@
 import numpy as np
+import math
 import jax
 import jax.numpy as jnp
 import jax.scipy.optimize as jopt
 import jax.example_libraries.optimizers as joptimizers
+import jax.tree_util as jtu
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 import os, csv, argparse, time
@@ -11,7 +13,7 @@ def loss_max_radius_boundary_R4_jax(params, x1B, x2B, y1B, y2B, degree, k, w_cen
     # forward pass through HenonComp
     X1, X2, Y1, Y2 = henon_comp_forward_jax(params, degree, k, x1B, x2B, y1B, y2B)
     r = jnp.sqrt(X1**2 + X2**2 + Y1**2 + Y2**2)
-    R = jnp.max(r)
+    R = jnp.max(r) ** 2
     if tau is None or tau == 0:
         Lmax = jnp.max(r)
     else:
@@ -22,67 +24,32 @@ def loss_max_radius_boundary_R4_jax(params, x1B, x2B, y1B, y2B, degree, k, w_cen
     cx = jnp.mean(X1); cy = jnp.mean(X2); cp = jnp.mean(Y1); cq = jnp.mean(Y2)
     reg = jnp.sum(params**2)
     L = Lmax + w_center * (cx**2 + cy**2 + cp**2 + cq**2) + w_reg * reg
-    # return (loss, aux) so callers can request auxiliary data via has_aux=True
     return L, R
 
-'''
-def polyval2d(y1, y2, coeffs):
-    """Vectorized, JAX-friendly 2D polynomial evaluator.
-
-    coeffs shape (m,n) corresponds to powers y1^{m-1-i} * y2^{n-1-j}.
-    """
-    # ensure JAX arrays and consistent dtype
-    y1_arr = jnp.asarray(y1)
-    y2_arr = jnp.asarray(y2)
-    coeffs = jnp.asarray(coeffs, dtype=y1_arr.dtype)
-
-    m, n = coeffs.shape
-    # flatten inputs to 1D for Vandermonde construction
-    y1_flat = jnp.ravel(y1_arr)
-    y2_flat = jnp.ravel(y2_arr)
-
-    # Vandermonde matrices: columns are y**(m-1), ..., y**0
-    V1 = jnp.vander(y1_flat, N=m)
-    V2 = jnp.vander(y2_flat, N=n)
-
-    # compute outer-product of Vandermonde columns per-point and contract with coeffs
-    # shape (P, m, n) = V1[:, :, None] * V2[:, None, :]
-    terms = V1[:, :, None] * V2[:, None, :]
-    val_flat = jnp.sum(terms * coeffs[None, :, :], axis=(1, 2))
-    return val_flat.reshape(y1_arr.shape)
-'''
 
 def polyval2d(y1, y2, coeffs):
     # like np.polyval2d but vectorized and JAX-friendly
-    m, n = coeffs.shape
+    D = coeffs.shape[0]
     val = jnp.zeros_like(y1)
-    for i in range(m):
-        for j in range(n):
-            val += coeffs[i, j] * (y1 ** (m - 1 - i)) * (y2 ** (n - 1 - j))
+    for i in range(D):
+        for j in range(D):
+            val += coeffs[i, j] * (y1 ** (D - 1 - i)) * (y2 ** (D - 1 - j))
     return val
 
-# Apply a single Henon map defined by coeffs and const to arrays of points
-# coeffs is a square 2D array of shape (D,D) defining the polynomial V(y1,y2)
 def henon_map_apply_jax(x1, x2, y1, y2, coeffs, const):
-    coeffs = jnp.asarray(coeffs)
     D = coeffs.shape[0]
-    if D <= 1:
-        dV_dy1 = jnp.zeros_like(y1)
-        dV_dy2 = jnp.zeros_like(y2)
-    else:
-        exponents = jnp.arange(D)           # 0..D-1
-        row_mult = (D - 1 - exponents)[:, None]   # shape (D,1)
-        col_mult = (D - 1 - exponents)[None, :]   # shape (1,D)
+    dV_dy1 = jnp.zeros_like(y1)
+    dV_dy2 = jnp.zeros_like(y2)
 
-        dcoeff_dy1 = row_mult * coeffs     # shape (D,D)
-        dcoeff_dy2 = col_mult * coeffs     # shape (D,D)
-
-        # differentiate reduces degree -> drop last row/col
-        dcoeff_dy1 = dcoeff_dy1[:-1, :]    # (D-1, D)
-        dcoeff_dy2 = dcoeff_dy2[:, :-1]    # (D, D-1)
-
-        dV_dy1 = polyval2d(y1, y2, dcoeff_dy1)
-        dV_dy2 = polyval2d(y1, y2, dcoeff_dy2)
+    for i in range(D):
+        for j in range(D):
+            c = coeffs[i, j]
+            p1 = D - 1 - i
+            p2 = D - 1 - j
+            if p1 > 0:
+                dV_dy1 = dV_dy1 + c * p1 * (y1 ** (p1 - 1)) * (y2 ** p2)
+            if p2 > 0:
+                dV_dy2 = dV_dy2 + c * p2 * (y1 ** p1) * (y2 ** (p2 - 1))
 
     return (
         y1 + const[0],
@@ -119,6 +86,23 @@ class Ellipsoid4D(Shape4D):
     def volume(self):
         return (np.pi**2/2.0) * float(np.prod(self.radii))
     
+class LagrangianTorus4D(Shape4D):
+    def __init__(self, a=1.0, b=2.0):
+        self.a = float(a)
+        self.b = float(b)
+    def boundary_points(self, k=2048, seed=0):
+        rng = np.random.default_rng(seed)
+        t1 = rng.uniform(0, 2*np.pi, k)
+        t2 = rng.uniform(0, 2*np.pi, k)
+        R1 = np.sqrt(self.a / np.pi)
+        R2 = np.sqrt(self.b / np.pi)
+        x1 = R1 * np.cos(t1)
+        y1 = R1 * np.sin(t1)
+        x2 = R2 * np.cos(t2)
+        y2 = R2 * np.sin(t2)
+        return x1, x2, y1, y2
+
+    
 def train_min_radius_boundary_R4(
     degree=3, k=6,
     n_boundary=6000,
@@ -129,7 +113,11 @@ def train_min_radius_boundary_R4(
     optimizer='adam',
     minibatch_size=None,
     sgd_momentum=0.0,
-    animate=True, max_frames=100
+    lr_backoff_factor=0.5,
+    min_lr=1e-12,
+    max_step_retries=5,
+    animate=True, max_frames=100,
+    tau=30.0
 ):
     timestart = time.time()
     D = degree + 1
@@ -142,28 +130,42 @@ def train_min_radius_boundary_R4(
 
     x1B_all, x2B_all, y1B_all, y2B_all = region.boundary_points(k=n_boundary, seed=seed+1)
 
+    current_lr = lr
     if optimizer == 'adam':
-        opt_init, opt_update, get_params = joptimizers.adam(lr)
+        opt_init, opt_update, get_params = joptimizers.adam(current_lr)
     elif optimizer == 'sgd':
-        opt_init, opt_update, get_params = joptimizers.momentum(lr, mass=sgd_momentum)
+        opt_init, opt_update, get_params = joptimizers.momentum(current_lr, mass=sgd_momentum)
     else:
         raise ValueError(f"Unknown optimizer: {optimizer}")
 
     opt_state = opt_init(theta)
 
+    def clip_grads(grads, max_norm=10.0):
+        leaves = jtu.tree_leaves(grads)
+        g2 = sum([jnp.sum(g**2) for g in leaves])
+        g_norm = jnp.sqrt(g2)
+        factor = jnp.minimum(1.0, max_norm / (g_norm + 1e-8))
+        return jtu.tree_map(lambda g: g * factor, grads)
+
     @jax.jit
-    def step(opt_state, x1B, x2B, y1B, y2B):
-        params = get_params(opt_state)
-        # use has_aux=True so loss_max... can return auxiliary data (r) without affecting grads
-        (loss, r), grads = jax.value_and_grad(loss_max_radius_boundary_R4_jax, has_aux=True)(
+    def compute_R(params, x1B, x2B, y1B, y2B):
+        X1, X2, Y1, Y2 = henon_comp_forward_jax(
+            params, degree, k, x1B, x2B, y1B, y2B
+        )
+        r = X1**2 + X2**2 + Y1**2 + Y2**2
+        return jnp.max(r)
+
+    @jax.jit
+    def compute_loss_and_grads(params, x1B, x2B, y1B, y2B):
+        (loss, R), grads = jax.value_and_grad(loss_max_radius_boundary_R4_jax, has_aux=True)(
             params, x1B, x2B, y1B, y2B,
             degree, k,
             w_center=w_center,
             w_reg=w_reg,
-            tau=10.0
+            tau = tau
         )
-        opt_state = opt_update(0, grads, opt_state)
-        return opt_state, loss, r
+        grads = clip_grads(grads, max_norm=10.0)
+        return loss, R, grads
 
     for it in range(n_iters):
         if minibatch_size is not None:
@@ -178,18 +180,66 @@ def train_min_radius_boundary_R4(
             y1B_batch = y1B_all
             y2B_batch = y2B_all
         
-        opt_state, loss, r = step(opt_state, x1B_batch, x2B_batch, y1B_batch, y2B_batch)
-        history.append(dict(it=it, loss=loss, R=r))
+        # attempt the step and, on divergence, retry on the same iteration
+        params = get_params(opt_state)
+        old_opt_state = opt_state
+        attempt = 0
+        accepted = False
+        while attempt <= max_step_retries:
+            # compute minibatch loss & grads
+            loss_mb, R_mb, grads = compute_loss_and_grads(params, x1B_batch, x2B_batch, y1B_batch, y2B_batch)
+            # propose optimizer state by applying the update with current opt_update
+            opt_state_candidate = opt_update(0, grads, opt_state)
+            params_candidate = get_params(opt_state_candidate)
+
+            # evaluate full-batch loss on the proposed params for safety
+            full_loss, full_R, _ = compute_loss_and_grads(params_candidate, x1B_all, x2B_all, y1B_all, y2B_all)
+
+            if jnp.isfinite(full_loss) and (full_loss <= 1e12):
+                # accept the candidate
+                opt_state = opt_state_candidate
+                params = params_candidate
+                # record accepted loss/R for downstream reporting
+                loss = full_loss
+                R = full_R
+                history.append(dict(it=it, loss=full_loss, R=full_R))
+                accepted = True
+                break
+
+            # otherwise rollback and back off
+            attempt += 1
+            print(f"Iter {it} attempt {attempt}: proposed step diverged (full_loss={float(full_loss)}). Rolling back.")
+            # restore previous optimizer state
+            opt_state = old_opt_state
+            # check retry limits
+            if attempt > max_step_retries or float(current_lr) * float(lr_backoff_factor) < float(min_lr):
+                print("Max retries reached or LR below min; stopping training.")
+                accepted = False
+                break
+            # reduce LR and reinitialize optimizer state from current params
+            current_lr = float(current_lr) * float(lr_backoff_factor)
+            print(f"Backing off LR to {current_lr:.3e} and reinitializing optimizer state.")
+            if optimizer == 'adam':
+                opt_init, opt_update, get_params = joptimizers.adam(current_lr)
+            else:
+                opt_init, opt_update, get_params = joptimizers.momentum(current_lr, mass=sgd_momentum)
+            opt_state = opt_init(params)
+
+        if not accepted:
+            print("Step failed after retries; stopping training.")
+            break
         if animate and (it % (n_iters // max_frames) == 0 or it == n_iters - 1):
+            
             params = get_params(opt_state)
             X1B, X2B, Y1B, Y2B = henon_comp_forward_jax(params, degree, k, x1B_all, x2B_all, y1B_all, y2B_all)
-            R = np.max(np.sqrt(X1B**2 + Y1B**2 + X2B**2 + Y2B**2))
             frames.append((X1B, Y1B, X2B, Y2B, R, it))
+            
         if (it + 1) % report_every == 0 or it == 0:
-            print(f"Iter {it+1}, Loss: {loss:.6f}, R: {r:.6f}")
-        if not jnp.isfinite(loss) or loss > 1e12:
-            print("Loss diverged, stopping training.")
-            break
+            params = get_params(opt_state)
+            print(f"Iter {it+1}, Loss: {float(loss):.6f}, R: {float(R):.6f}")
+
+
+
     timeend = time.time()
     print(f"Training completed in {timeend - timestart:.2f} seconds.")
     final_params = get_params(opt_state)
@@ -231,8 +281,8 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
     all_r1_min = np.inf; all_r1_max = -np.inf
     all_r2_min = np.inf; all_r2_max = -np.inf
     for X1, Y1, X2, Y2, _, _ in frames:
-        r1 =  (X1**2 + Y1**2)
-        r2 =  (X2**2 + Y2**2) / 4
+        r1 = 3 * np.pi * (X1**2 + Y1**2)
+        r2 = np.pi * (X2**2 + Y2**2)
         if r1.size:
             all_r1_min = min(all_r1_min, float(r1.min())); all_r1_max = max(all_r1_max, float(r1.max()))
         if r2.size:
@@ -255,8 +305,8 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
 
     def update(frame):
         X1, Y1, X2, Y2, R, it = frame
-        r1 =  (X1**2 + Y1**2)
-        r2 =  (X2**2 + Y2**2) / 4
+        r1 = 3 * np.pi * (X1**2 + Y1**2)
+        r2 = np.pi * (X2**2 + Y2**2)
         coords = np.column_stack([r1, r2])
         scat.set_offsets(coords)
         ax.set_title(f"Radial projection  R≈{R:.3f}  iter={it}")
@@ -269,26 +319,30 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif"):
     print(f"Saved radial projection animation to {outpath}")
 
 def main():
-    
-    d = 5
-    k = 12
-    radii = (1,np.sqrt(4),1,np.sqrt(4))
+    d = 3
+    k = 60
+    radii = (1,np.sqrt(6.25),1, np.sqrt(6.25))
     region = Ellipsoid4D(radii=radii)
+     # --------------------------
+    #  Lagrangian Torus
+    # --------------------------
+    # region = LagrangianTorus4D(a=1.0, b=3.0)
     final_params, history, frames = train_min_radius_boundary_R4(
         degree=d, k=k,
-        n_boundary=20000,
+        n_boundary=60000,
         region=region,
-        n_iters=2000, lr=2e-6, seed=1,
-        polynomial_bound=1e-3,
-        w_center=1e-3, w_reg=1e-7, report_every=100,
+        n_iters=3000, lr=1e-3, seed=11,
+        polynomial_bound=5e-3,
+        w_center=1e-3, w_reg=1e-7, report_every=500,
         optimizer='adam',
         minibatch_size=None,
-        sgd_momentum=0.5,
-        animate=False, max_frames=100
+        sgd_momentum=0.9,
+        animate=True, max_frames=300,
+        tau = 30
     )
 
     with open(os.path.join("output_r4","history.csv"), "w", newline="") as f:
-        writer = csv.DictWriter(f, fieldnames=["it","loss","R"])
+        writer = csv.DictWriter(f, fieldnames=["it","loss", "R"])
         writer.writeheader()
         for row in history:
             writer.writerow(row)
@@ -297,7 +351,19 @@ def main():
         save_projection_animation(frames, outpath=os.path.join("output_r4","training_animation.mp4"))
         save_radial_projection_animation(frames, outpath=os.path.join("output_r4","training_radial_animation.mp4"))
 
-    x1B, x2B, y1B, y2B = region.boundary_points(k=6000, seed=12)
+    with open(os.path.join("output_r4","params.txt"), "w", newline="") as f:
+        off = 0
+        for i in range(k - 1, -1, -1):
+            coeffs = final_params[off : off + (d+1)*(d+1)].reshape(d+1, d+1)
+            f.write(f"# Henon map {k - i} coefficients:\n")
+            for row in coeffs:
+                f.write("# " + ", ".join(f"{c:.6e}" for c in row) + "\n")
+            off += (d+1)*(d+1)
+            const = final_params[off : off + 2]
+            f.write(f"# Henon map {k - i} constants:\n{const[0]:.6e}, {const[1]:.6e}\n")
+            off += 2
+
+    x1B, x2B, y1B, y2B = region.boundary_points(k=int(1e6), seed=12)
     X1B, X2B, Y1B, Y2B = henon_comp_forward_jax(final_params, d, k, x1B, x2B, y1B, y2B)
     fig, axes = plt.subplots(1,2, figsize=(9,4.5))
     axes[0].scatter(X1B, Y1B, s=1)
@@ -309,9 +375,34 @@ def main():
         ax.set_title(title)
     fig.savefig(os.path.join("output_r4","snapshot.png"), dpi=150)
 
-    
+    # wrapper mapping a 4-vector -> 4-vector using the composition
+    def henon_comp_point(z, params, degree, k):
+        x1, x2, y1, y2 = z
+        # henon_comp_forward_jax expects arrays; call with length-1 arrays and squeeze
+        x1p, x2p, y1p, y2p = henon_comp_forward_jax(
+            params, degree, k,
+            jnp.array([x1]), jnp.array([x2]), jnp.array([y1]), jnp.array([y2])
+        )
+        return jnp.stack([x1p[0], x2p[0], y1p[0], y2p[0]])
 
+    # Jacobian w.r.t. the input point z (shape (4,4))
+    jac_fn = jax.jacfwd(henon_comp_point, argnums=0)  # or jax.jacrev
 
+    # Example: compute at a single point
+    params = jnp.asarray(final_params, dtype=jnp.float32)
+
+    # Symplectic matrix S for ordering (x1,x2,y1,y2)
+    I2 = jnp.eye(2)
+    Z2 = jnp.zeros((2,2))
+    S = jnp.block([[Z2, I2], [-I2, Z2]])
+
+    # If you want a batch of boundary points (points: array shape (N,4)):
+    points = jnp.stack([x1B, x2B, y1B, y2B], axis=1)   # from your Ellipsoid4D.boundary_points
+    batched_jac = jax.vmap(lambda z: jac_fn(z, params, d, k))(points)  # shape (N,4,4)
+    # compute worst-case symplectic error across points
+    errs = jax.vmap(lambda J: jnp.max(jnp.abs(J.T @ S @ J - S)))(batched_jac)
+    print("max symplectic error over batch:", float(jnp.max(errs)))
+    print("avg symplectic error over batch:", float(jnp.mean(errs)))
     
 
 if __name__ == '__main__':
