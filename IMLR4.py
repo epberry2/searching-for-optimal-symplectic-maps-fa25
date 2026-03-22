@@ -154,13 +154,20 @@ def train_min_radius_boundary_R4(
     min_lr=1e-12,
     max_step_retries=5,
     animate=False, max_frames=100,
-    tau=30.0
+    tau=30.0,
+    initial_params=None
 ):
     timestart = time.time()
     D = degree + 1
     num_params = k * D * D + 2 * k
     rng = np.random.default_rng(seed)
-    theta = rng.normal(scale=polynomial_bound, size=num_params) # initial params
+    
+    # Use provided params or initialize new ones
+    if initial_params is not None:
+        theta = np.asarray(initial_params, dtype=np.float32)
+        print("Initializing from provided parameters")
+    else:
+        theta = rng.normal(scale=polynomial_bound, size=num_params) # initial params
 
     history = []
     frames = []
@@ -323,9 +330,9 @@ def save_radial_projection_animation(frames, outpath="r4_radial_training.gif", w
     fig, ax = plt.subplots(1, 1, figsize=(6,6))
     scat = ax.scatter([], [], s=1)
     ax.set_aspect('equal')
-    if all_r1_max > 100 or all_r2_max > 100:
-        ax.set_xlim(-1, 100)
-        ax.set_ylim(-1, 100)
+    if all_r1_max > 10 or all_r2_max > 10:
+        ax.set_xlim(-1, 10)
+        ax.set_ylim(-1, 10)
     else:
         ax.set_xlim(all_r1_min - pad1, all_r1_max + pad1)
         ax.set_ylim(all_r2_min - pad2, all_r2_max + pad2)
@@ -352,22 +359,31 @@ def main():
     k = 40 # number of Henon maps in composition
 
     radii = (1,np.sqrt(4),1, np.sqrt(4))
-    region = Ellipsoid4D(radii=radii)
+    #region = Ellipsoid4D(radii=radii)
     #region = PolyDisk4D(a=1.0, b=6.0)
-    #region = LagrangianTorus4D(a=1.0, b=6.0)
+    region = LagrangianTorus4D(a=1.0, b=6.0)
 
+    loaded_params = np.load("output_r4/final_params.npy")
+
+    print("Starting Training")
     final_params, history, frames = train_min_radius_boundary_R4(
         degree=d, k=k,
-        n_boundary=20000,
+        n_boundary=10000,
         region=region,
-        n_iters=3000, lr=1e-4, seed=11,
+        n_iters=1000, lr=1e-4, seed=54,
         polynomial_bound=0,
-        w_center=1e-3, w_reg=1e-7, report_every=500,
+        w_center=1e-3, w_reg=1e-7, report_every=1000,
         optimizer='adam',
         minibatch_size=None,
-        animate=True, max_frames=50,
-        tau = 30
+        animate=False, max_frames=1,
+        tau = 50,
+        initial_params=loaded_params
     )
+
+    # Save final parameters as binary
+    os.makedirs("output_r4", exist_ok=True)
+    np.save(os.path.join("output_r4", "final_params.npy"), final_params)
+    print(f"Saved final parameters to output_r4/final_params.npy")
 
     # write history to CSV
     os.makedirs("output_r4", exist_ok=True)
@@ -397,7 +413,7 @@ def main():
 
     # generate and save snapshot of final map
     # note that this is a different set of boundary points than used in training
-    x1B, x2B, y1B, y2B = region.boundary_points(k=int(5e6), seed=100)
+    x1B, x2B, y1B, y2B = region.boundary_points(k=int(1e5), seed=100)
     X1B, X2B, Y1B, Y2B = henon_comp_forward_jax(final_params, d, k, x1B, x2B, y1B, y2B)
     fig, axes = plt.subplots(1,2, figsize=(9,4.5))
     axes[0].scatter(X1B, Y1B, s=1)
@@ -409,7 +425,26 @@ def main():
         ax.set_title(title)
     fig.savefig(os.path.join("output_r4","snapshot.png"), dpi=150)
 
+    print("Saved snapshot of final map to output_r4/snapshot.png")
 
+    # save radial projection of final map
+    r1 = X1B**2 + Y1B**2
+    r2 = X2B**2 + Y2B**2
+    fig, ax = plt.subplots(1,1, figsize=(6,6))
+    ax.scatter(r1, r2, s=1)
+    ax.set_aspect("equal")
+    ax.set_xlim(0, 2); ax.set_ylim(0, 2)
+    ax.grid(True, alpha=0.3)
+    ax.set_title("Radial Projection")
+    fig.savefig(os.path.join("output_r4","radial_snapshot.png"), dpi=150)
+
+    print("Saved radial projection snapshot to output_r4/radial_snapshot.png")
+
+
+    final_R = float(jnp.max(X1B**2 + X2B**2 + Y1B**2 + Y2B**2))
+    print(f"Final max radius on boundary: {final_R:.6f}")
+
+    print("Computing Symplectic Error")
     # compute Jacobians and symplectic errors
 
     # wrapper mapping a 4-vector -> 4-vector using the composition
